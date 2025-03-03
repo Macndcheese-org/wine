@@ -222,6 +222,7 @@ extern ULONG session_id;
 extern int main_argc;
 extern char **main_argv;
 extern WCHAR **main_wargv;
+extern WCHAR main_image_name[MAX_PATH];  /* CROSSOVER HACK: bug 17634 */
 extern const WCHAR system_dir[];
 extern unsigned int supported_machines_count;
 extern USHORT supported_machines[8];

@@ -1491,6 +1491,19 @@ NTSTATUS load_main_exe( UNICODE_STRING *nt_name, USHORT load_machine )
 
     if (loadorder == LO_DISABLED) NtTerminateProcess( GetCurrentProcess(), status );
 
+    /* CROSSOVER HACK: bug 17634
+     * force_laa() looks the image up in AppDefaults while the first TEB is being
+     * allocated, which now happens before main_wargv is built. */
+    {
+        const WCHAR *p = nt_name->Buffer, *end = p + nt_name->Length / sizeof(WCHAR), *base = p;
+        ULONG len;
+
+        for (; p < end; p++) if (*p == '\\') base = p + 1;
+        len = min( end - base, ARRAY_SIZE(main_image_name) - 1 );
+        memcpy( main_image_name, base, len * sizeof(WCHAR) );
+        main_image_name[len] = 0;
+    }
+
     InitializeObjectAttributes( &attr, nt_name, OBJ_CASE_INSENSITIVE, 0, NULL );
     if (!get_nt_and_unix_names( &attr, &true_nt_name, &unix_name, FILE_OPEN, FALSE ))
         status = open_dll_file( unix_name, &attr, &mapping );

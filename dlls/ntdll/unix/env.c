@@ -76,6 +76,7 @@ static const WCHAR bootstrapW[] = {'W','I','N','E','B','O','O','T','S','T','R','
 int main_argc = 0;
 char **main_argv = NULL;
 WCHAR **main_wargv = NULL;
+WCHAR main_image_name[MAX_PATH];  /* CROSSOVER HACK: bug 17634 */
 
 static LCID user_lcid, system_lcid;
 static LANGID user_ui_language;
