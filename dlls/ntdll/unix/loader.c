@@ -1097,8 +1097,7 @@ static void init_non_native_support(void)
     {
         register_non_native_code_region = dlsym( non_native_support_lib, "register_non_native_code_region" );
         supports_non_native_code_regions = dlsym( non_native_support_lib, "supports_non_native_code_regions" );
-        TRACE( "Loaded libd3dshared.dylib, does%s support non-native code regions
-",
+        TRACE( "Loaded libd3dshared.dylib, does%s support non-native code regions\n",
                 supports_non_native_code_regions ? (supports_non_native_code_regions() ? "" : " not") : " not" );
 
         /* MNC HACK 17: record libd3dshared's __TEXT bounds so the
@@ -1117,15 +1116,13 @@ static void init_non_native_support(void)
                 libd3dshared_load_addr = dli.dli_fbase;
                 libd3dshared_code_end  = text_end ? (void *)(text_end + sz)
                                                   : (void *)((char *)dli.dli_fbase + 0x100000);
-                TRACE( "MNC HACK 17 libd3dshared range: %p-%p
-",
+                TRACE( "MNC HACK 17 libd3dshared range: %p-%p\n",
                        libd3dshared_load_addr, libd3dshared_code_end );
             }
         }
     }
     else
-        TRACE( "Loading libd3dshared.dylib failed: %s
-", dlerror() );
+        TRACE( "Loading libd3dshared.dylib failed: %s\n", dlerror() );
 }
 
 static NTSTATUS pe_module_loaded( void *args )
@@ -1145,8 +1142,7 @@ static NTSTATUS pe_module_loaded( void *args )
     pthread_once( &non_native_init_once, &init_non_native_support );
     if ((supports_non_native_code_regions && supports_non_native_code_regions()))
     {
-        TRACE( "Marking non_native_code_region: %p-%p
-", params->start, params->end );
+        TRACE( "Marking non_native_code_region: %p-%p\n", params->start, params->end );
         register_non_native_code_region( params->start, params->end );
     }
     return STATUS_SUCCESS;
