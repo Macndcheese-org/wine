@@ -196,6 +196,31 @@ void WINAPI ExitProcess( DWORD status )
 
 #endif
 
+/* MNC HACK 26: detect whether the CURRENT process is steamwebhelper.exe.
+ * Used by GetExitCodeProcess below to coerce a clean exit (0) from a
+ * steamwebhelper child to 1, forcing Steam to respawn it. Source: CrossOver
+ * 26 dlls/kernel32/process.c:213-267 (CX HACK 22643). */
+static BOOL WINAPI mnc_check_is_steamwebhelper( INIT_ONCE *once, void *param, void **ctx )
+{
+    BOOL *is_swh = param;
+    WCHAR name[MAX_PATH], *module_exe;
+    if (GetModuleFileNameW( NULL, name, ARRAY_SIZE(name) ))
+    {
+        module_exe = wcsrchr( name, '\\' );
+        module_exe = module_exe ? module_exe + 1 : name;
+        *is_swh = !wcsicmp( module_exe, L"steamwebhelper.exe" );
+    }
+    return TRUE;
+}
+
+static BOOL mnc_is_steamwebhelper( void )
+{
+    static BOOL is_swh = FALSE;
+    static INIT_ONCE once = INIT_ONCE_STATIC_INIT;
+    InitOnceExecuteOnce( &once, mnc_check_is_steamwebhelper, &is_swh, NULL );
+    return is_swh;
+}
+
 /***********************************************************************
  * GetExitCodeProcess           [KERNEL32.@]
  *
@@ -216,6 +241,17 @@ BOOL WINAPI GetExitCodeProcess( HANDLE hProcess, LPDWORD lpExitCode )
     if (!set_ntstatus( NtQueryInformationProcess( hProcess, ProcessBasicInformation, &pbi, sizeof(pbi), NULL )))
         return FALSE;
     if (lpExitCode) *lpExitCode = pbi.ExitStatus;
+
+    /* MNC HACK 26: a Rosetta bug on macOS Monterey+ causes 32-bit
+     * steamwebhelper children to exit cleanly (status 0) instead of
+     * crashing. Steam treats a zero exit as "intentional clean shutdown"
+     * and stops respawning the helper, which kills the friends list /
+     * store / in-game overlay. Coerce to 1 so Steam restarts it. */
+    if (lpExitCode && *lpExitCode == 0 && mnc_is_steamwebhelper())
+    {
+        TRACE( "MNC HACK 26: steamwebhelper exited 0, returning 1 to force respawn\n" );
+        *lpExitCode = 1;
+    }
     return TRUE;
 }
 

@@ -72,7 +72,20 @@ typedef void  (CALLBACK *LDRENUMPROC)(LDR_DATA_TABLE_ENTRY *, void *, BOOLEAN *)
 static void __fastcall default_thread_init_func( DWORD unknown, LPTHREAD_START_ROUTINE entry, void *arg );
 void (FASTCALL *pBaseThreadInitThunk)(DWORD,LPTHREAD_START_ROUTINE,void *) = default_thread_init_func;
 NTSTATUS (WINAPI *__wine_unix_call_dispatcher)( unixlib_handle_t, unsigned int, void * ) = NULL;
-
+#ifdef __i386__
+__attribute__((stdcall,used))
+NTSTATUS wine_unix_call_export( ULONG handle, unsigned int code, void *args )
+{
+    if (!handle) return STATUS_UNSUCCESSFUL;
+    return __wine_unix_call_dispatcher( (unixlib_handle_t)handle, code, args );
+}
+#else
+NTSTATUS WINAPI wine_unix_call_export( unixlib_handle_t handle, unsigned int code, void *args )
+{
+    if (!handle) return STATUS_UNSUCCESSFUL;
+    return __wine_unix_call_dispatcher( handle, code, args );
+}
+#endif
 static DWORD (WINAPI *pCtrlRoutine)(void *);
 
 SYSTEM_DLL_INIT_BLOCK LdrSystemDllInitBlock = { 0xf0 };
@@ -92,6 +105,44 @@ static const WCHAR system_path[] = L"C:\\windows\\system32;C:\\windows\\system;C
 
 
 static BOOL is_prefix_bootstrap;  /* are we bootstrapping the prefix? */
+
+/* Bradar MNC (preserve 32-bit on a prefix with an empty i386 slice): if a prefix's
+ * syswow64 directory was never populated with the 32-bit builtins, the post-bootstrap
+ * loader refuses to load 32-bit builtins "without a file" and evry 32-bit process dies
+ * with kernel32 c0000135. This gate (env MNC_SKIP_WOW64_INSTALL=1) lets
+ * find_builtin_without_file resolve builtins straight from the wine lib/build dir even
+ * post-bootstrap -- exactly what is_prefix_bootstrap already permits -- so 32-bit keeps
+ * working on such a prefix.
+ * Since wineboot now populates syswow64 natively at bootstrap (mnc_populate_wow64_dir),
+ * this should not be needed on a prefix this engine created; it remains an escape hatch
+ * for one bootstrapped elsewhere. Cached on first use; default OFF so normal prefixes
+ * are 100% unchanged. */
+static BOOL mnc_wow64_builtin_nofile(void)
+{
+    static int cached = -1;
+    if (cached == -1)
+    {
+        /* Bradar MNC: OPT-IN escape hatch for a prefix whose i386 slice is EMPTY -- resolve
+         * 32-bit builtins straight from the wine lib/build dir insted of from syswow64
+         * (an empty slice otherwise kills evry 32-bit proc with kernel32 c0000135).
+         * Normally not needed any more: wineboot now populates syswow64 natively on
+         * bootstrap (see mnc_populate_wow64_dir), so the files r realy there. Kept for
+         * prefixes bootstrapped by some OTHER wine that left the slice empty.
+         * DEFAULT OFF so a plain wineboot / stock prefix is 100% unchanged.
+         * (This was flipped default-ON on 2026-06-28 back when wineboot skipped the i386
+         * stage outright; that silently gave every standalone user of the engine a fresh
+         * prefix with an empty i386 slice + hung wineboot's OWN 32-bit gecko/mono MSI
+         * installs, which is exactly the bug the native populate now fixes properly.) */
+        UNICODE_STRING name, value;
+        WCHAR valbuf[8] = {0};
+        RtlInitUnicodeString( &name, L"MNC_SKIP_WOW64_INSTALL" );
+        value.Buffer = valbuf; value.Length = 0; value.MaximumLength = sizeof(valbuf);
+        cached = (!RtlQueryEnvironmentVariable_U( NULL, &name, &value ) &&
+                  value.Length >= sizeof(WCHAR) && valbuf[0] == '1');
+    }
+    return cached;
+}
+
 static BOOL imports_fixup_done = FALSE;  /* set once the imports have been fixed up, before attaching them */
 static BOOL process_detaching = FALSE;  /* set on process detach to avoid deadlocks with thread detach */
 static int free_lib_count;   /* recursion depth of LdrUnloadDll calls */
@@ -618,10 +669,18 @@ static WINE_MODREF *find_basename_module( LPCWSTR name )
 {
     PLIST_ENTRY mark, entry;
     UNICODE_STRING name_str;
+    unsigned int name_len;
+    BOOL d3dm_stub;   /* Bradar MNC: the D3DMetal "*_d3dm.dll" stubs are system32 builtins that get the
+                         system / LDR_REDIRECTED flags this function normally skips. Engines that do
+                         GetModuleHandleW("d3d12.dll") (which steam_dxmt_redirect rewrites to
+                         "d3d12_d3dm.dll") would then get NULL and crash (RE-Engine RE4, Unity ULTRAKILL).
+                         Allow the _d3dm stubs to be found despite the skip. */
 
     RtlInitUnicodeString( &name_str, name );
+    name_len = name_str.Length / sizeof(WCHAR);
+    d3dm_stub = (name_len >= 9 && !wcsicmp( name + name_len - 9, L"_d3dm.dll" ));
 
-    if (cached_modref && !(cached_modref->ldr.Flags & LDR_REDIRECTED)
+    if (cached_modref && (d3dm_stub || !(cached_modref->ldr.Flags & LDR_REDIRECTED))
         && RtlEqualUnicodeString( &name_str, &cached_modref->ldr.BaseDllName, TRUE ))
         return cached_modref;
 
@@ -629,7 +688,7 @@ static WINE_MODREF *find_basename_module( LPCWSTR name )
     for (entry = mark->Flink; entry != mark; entry = entry->Flink)
     {
         WINE_MODREF *mod = CONTAINING_RECORD(entry, WINE_MODREF, ldr.HashLinks);
-        if (!mod->system && !(mod->ldr.Flags & LDR_REDIRECTED)
+        if ((d3dm_stub || (!mod->system && !(mod->ldr.Flags & LDR_REDIRECTED)))
             && RtlEqualUnicodeString( &name_str, &mod->ldr.BaseDllName, TRUE ))
         {
             cached_modref = CONTAINING_RECORD(mod, WINE_MODREF, ldr);
@@ -1896,6 +1955,74 @@ static void process_detach(void)
  * reverse sequence of process detach notification.
  * The loader_section must be locked while calling this function.
  */
+/* Bradar MNC HACK 13 (2026-05-17 night): Source 2 / Steam DLLs do blocking work
+ * inside DllMain(DLL_THREAD_ATTACH) — typically waiting on Apple framework
+ * state initialised by libd3dshared / D3DMetal. Under our wine-d3dmetal
+ * shim that init never completes from a wine PE thread, so the very first
+ * worker-thread DllMain hangs and freezes wine's loader_section critical
+ * section for the rest of the process. Symptom: cs2 loads 76 DLLs to start
+ * the 12-thread engine boot then deadlocks before reaching rendersystemdx11
+ * / materialsystem2 / d3d11 — i.e. never reaches its own CreateWindowExW.
+ *
+ * Fix: synthesize the moral equivalent of DisableThreadLibraryCalls() for
+ * known-bad DLLs by short-circuiting their DllMain(DLL_THREAD_ATTACH) on
+ * non-main threads. The DLLs in question (engine2, tier0, steamclient64,
+ * steam_api64, steamnetworkingsockets, vstdlib_s64, tier0_s64) maintain
+ * their own per-thread state via custom TLS allocators (Source 2's CTSList,
+ * Steam's IPC threading), so DllMain isn't actually required for them to
+ * function — Source/Steam ship for Windows where DllMain works synchronously
+ * but the work it does there is duplicated lazily by their internal code.
+ *
+ * Opt-out denylist via env WINE_D3DMETAL_DLL_NO_THREAD_ATTACH=csv,of,names.
+ * If absent we use a built-in default list (the seven names above). */
+static int mnc_should_skip_thread_attach( const UNICODE_STRING *name )
+{
+    /* Bradar MNC: HACK 13 disabled in the unified build — it skipped THREAD_ATTACH for
+     * Steam's own core dlls (steamclient64/tier0/vstdlib), which breaks Steam
+     * ITSELF (it relies on their per-thread init). It was only needed for
+     * Source2 games loading those dlls; re-gate to non-steam if such a game needs it. */
+    return 0;
+
+    static const WCHAR *default_skips[] = {
+        L"engine2.dll", L"tier0.dll", L"steamclient64.dll",
+        L"steam_api64.dll", L"steamnetworkingsockets.dll",
+        L"vstdlib_s64.dll", L"tier0_s64.dll",
+        /* Bradar MNC HACK 13.1 (2026-05-18): vconcomm.dll (Source 2 vconsole
+         * communication) THREAD_ATTACH hangs on a libdispatch / Apple
+         * framework primitive the same way the others do, blocking cs2's
+         * main thread (0024) on loader_section held by 013c. Adding the
+         * full known set of Source 2 satellite DLLs that spawn or service
+         * worker threads through Apple frameworks. */
+        L"vconcomm.dll", L"vphysics2.dll", L"vscript.dll",
+        L"filesystem_stdio.dll", L"inputsystem.dll",
+        L"materialsystem2.dll", L"rendersystemdx11.dll",
+        L"resourcesystem.dll", L"schemasystem.dll",
+        L"meshsystem.dll", L"animationsystem.dll",
+        L"networksystem.dll", L"soundsystem.dll",
+        L"scenefilecache.dll", L"scenesystem.dll",
+        L"worldrenderer.dll", L"panorama.dll",
+        L"server.dll", L"client.dll",
+    };
+    /* Always on. To revert: restore /Users/teoballesteros/wine-shim-backup/
+     * ntdll.dll.pre-MNC13 over the install. */
+    if (!name || !name->Buffer) return 0;
+    for (size_t i = 0; i < ARRAY_SIZE(default_skips); i++)
+    {
+        const WCHAR *want = default_skips[i];
+        const WCHAR *got  = name->Buffer;
+        size_t j = 0;
+        for (;; j++)
+        {
+            WCHAR a = want[j], b = got[j];
+            if (a >= 'A' && a <= 'Z') a = (WCHAR)(a + 0x20);
+            if (b >= 'A' && b <= 'Z') b = (WCHAR)(b + 0x20);
+            if (a != b) break;
+            if (a == 0) return 1;
+        }
+    }
+    return 0;
+}
+
 static void thread_attach(void)
 {
     PLIST_ENTRY mark, entry;
@@ -1910,6 +2037,8 @@ static void thread_attach(void)
             continue;
         if ( mod->Flags & LDR_NO_DLL_CALLS )
             continue;
+        if ( mnc_should_skip_thread_attach( &mod->BaseDllName ) )
+            continue;  /* Bradar MNC HACK 13 */
 
         MODULE_InitDLL( CONTAINING_RECORD(mod, WINE_MODREF, ldr), DLL_THREAD_ATTACH, NULL );
     }
@@ -3509,6 +3638,181 @@ static void apply_binary_patches( WINE_MODREF* wm )
 }
 #endif
 
+#ifdef __x86_64__
+/* Bradar MNC HACK 27: patch out `mov rax,[gs:0x8]` accesses in loaded libcef.dll /
+ * Qt5WebEngineCore.dll.
+ *
+ * CEF reads TIB[8] (stack-top) on hot paths. Rosetta x86_64 fails on the
+ * direct gs:0x8 read inside a wine PE module — the wine TEB does not mirror
+ * Apple's pthread_teb at offset 8. CW's fix is to rewrite the load to
+ * `mov rax,[gs:0x30]; mov rax,[rax+8]` (double-indirect through the TEB
+ * mirror we install via MNC HACK 22 v3).
+ *
+ * The before/after byte sequences and offsets below are CW's verbatim port
+ * (CW HACK 19487/18582/22584L/19114/16900/21548) covering libcef 72.0.x,
+ * 85.3.x, and Qt5WebEngineCore 5.15.2. Modern Steam ships libcef.dll 128+,
+ * which we do NOT yet have an entry for. When Steam's CEF loads and no entry
+ * matches, patch_libcef logs a FIXME with the module path so we can
+ * disassemble that version and add a new row in a follow-up patch. */
+static void patch_libcef( const WCHAR *libname, WINE_MODREF **pwm )
+{
+    static const char before_85_3_9_0[] =
+    {
+        0x65, 0x48, 0x8b, 0x04, 0x25, 0x08, 0x00, 0x00, 0x00, /* mov rax,[gs:0x8] */
+        0xc3, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,             /* ret + int3 pad   */
+        0x48, 0x83, 0xec, 0x28,                               /* sub rsp,0x28     */
+        0x65, 0x48, 0x8b, 0x04, 0x25, 0x08, 0x00, 0x00, 0x00, /* mov rax,[gs:0x8] */
+        0x48, 0x83, 0xc0, 0xf8                                /* add rax,-8       */
+    };
+    static const char after_85_3_9_0[] =
+    {
+        0x65, 0x48, 0x8b, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00, /* mov rax,[gs:0x30]    */
+        0x48, 0x8b, 0x40, 0x08,                               /* mov rax,[rax+8]      */
+        0xc3, 0xcc, 0xcc,                                     /* ret + int3 pad       */
+        0x48, 0x83, 0xec, 0x28,                               /* sub rsp,0x28         */
+        0xe8, 0xe7, 0xff, 0xff, 0xff,                         /* call shim above      */
+        0x90, 0x90, 0x90, 0x90,                               /* nop pad              */
+        0x48, 0x83, 0xc0, 0xf8                                /* add rax,-8           */
+    };
+    C_ASSERT( sizeof(before_85_3_9_0) == sizeof(after_85_3_9_0) );
+
+    static const char before_85_3_11_1[] =
+    {
+        0x48, 0x8b, 0x44, 0x24, 0x28,                          /* mov rax,[rsp+0x28] */
+        0x65, 0x48, 0x8b, 0x34, 0x25, 0x08, 0x00, 0x00, 0x00,  /* mov rsi,[gs:0x8]   */
+        0x48, 0x85, 0xf6,                                       /* test rsi,rsi      */
+        0x74, 0x2e                                              /* jz +0x2e          */
+    };
+    static const char after_85_3_11_1[] =
+    {
+        0x48, 0x8b, 0x44, 0x24, 0x28,                          /* mov rax,[rsp+0x28]  */
+        0x65, 0x48, 0x8b, 0x34, 0x25, 0x30, 0x00, 0x00, 0x00,  /* mov rsi,[gs:0x30]   */
+        0x48, 0x8b, 0x76, 0x08,                                /* mov rsi,[rsi+8]     */
+        0x90,                                                  /* nop                 */
+    };
+    C_ASSERT( sizeof(before_85_3_11_1) == sizeof(after_85_3_11_1) );
+
+    static const char before_72_0_3626_121_1[] =
+    {
+        0x65, 0x48, 0x8b, 0x04, 0x25, 0x08, 0x00, 0x00, 0x00, /* mov rax,[gs:0x8] */
+        0xc3,                                                 /* ret              */
+        0x48, 0x83, 0xec, 0x28,                               /* sub rsp,0x28     */
+        0x65, 0x48, 0x8b, 0x04, 0x25, 0x08, 0x00, 0x00, 0x00, /* mov rax,[gs:0x8] */
+        0x48, 0x83, 0xc0, 0xf8,                               /* add rax,-8       */
+    };
+    static const char after_72_0_3626_121_1[] =
+    {
+        0xe8, 0xb7, 0x00, 0x00, 0x00,                         /* call +0xbc      */
+        0x90, 0x90, 0x90, 0x90,                               /* nop pad         */
+        0xc3,                                                 /* ret             */
+        0x48, 0x83, 0xec, 0x28,                               /* sub rsp,0x28    */
+        0xe8, 0xa9, 0x00, 0x00, 0x00,                         /* call +0xae      */
+        0x90, 0x90, 0x90, 0x90,                               /* nop pad         */
+        0x48, 0x83, 0xc0, 0xf8,                               /* add rax,-8      */
+    };
+    C_ASSERT( sizeof(before_72_0_3626_121_1) == sizeof(after_72_0_3626_121_1) );
+
+    static const char before_72_0_3626_121_2[] =
+    {
+        0x48, 0x8b, 0x46, 0x08,                               /* mov rax,[rsi+8]   */
+        0x65, 0x48, 0x8b, 0x34, 0x25, 0x08, 0x00, 0x00, 0x00, /* mov rsi,[gs:0x8]  */
+        0x48, 0x85, 0xf6,                                     /* test rsi,rsi      */
+        0x74, 0x2e,                                           /* jz +0x2e          */
+    };
+    static const char after_72_0_3626_121_2[] =
+    {
+        0x48, 0x8b, 0x46, 0x08,                               /* mov rax,[rsi+8]   */
+        0x65, 0x48, 0x8b, 0x34, 0x25, 0x30, 0x00, 0x00, 0x00, /* mov rsi,[gs:0x30] */
+        0x48, 0x8b, 0x76, 0x08,                               /* mov rsi,[rsi+8]   */
+        0x90,                                                 /* nop               */
+    };
+    C_ASSERT( sizeof(before_72_0_3626_121_2) == sizeof(after_72_0_3626_121_2) );
+
+    static const char before_72_0_3626_121_3[] =
+    {
+        0xcc, 0x0f, 0x0b, 0x6a, 0x1c, 0x0f, 0x0b,
+        0xcc, 0x0f, 0x0b, 0x6a, 0x1d, 0x0f, 0x0b,
+    };
+    static const char after_72_0_3626_121_3[] =
+    {
+        0x65, 0x48, 0x8b, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00, /* mov rax,[gs:0x30] */
+        0x48, 0x8b, 0x40, 0x08,                               /* mov rax,[rax+8]   */
+        0xc3,                                                 /* ret               */
+    };
+    C_ASSERT( sizeof(before_72_0_3626_121_3) == sizeof(after_72_0_3626_121_3) );
+
+    struct
+    {
+        const WCHAR *libname;
+        const char  *name;
+        const void  *before, *after;
+        SIZE_T       size;
+        ULONG_PTR    offset;
+        BOOL         stop_after_success;
+    }
+    static const patches[] =
+    {
+        /* libcef 85.3.11 (Rockstar) */
+        { L"libcef.dll", "85.3.11-0", before_85_3_9_0,         after_85_3_9_0,
+          sizeof(before_85_3_9_0),         0x28c5190, FALSE },
+        { L"libcef.dll", "85.3.11-1", before_85_3_11_1,        after_85_3_11_1,
+          sizeof(before_85_3_11_1),        0x28c521a, TRUE  },
+        /* libcef 85.3.9.0 (Rockstar) */
+        { L"libcef.dll", "85.3.9.0",  before_85_3_9_0,         after_85_3_9_0,
+          sizeof(before_85_3_9_0),         0x28c4b30, TRUE  },
+        /* libcef 72.0.3626.121 (beamNG.drive) */
+        { L"libcef.dll", "72.0.3626.121-1", before_72_0_3626_121_1, after_72_0_3626_121_1,
+          sizeof(before_72_0_3626_121_1),  0x23bb2ad, FALSE },
+        { L"libcef.dll", "72.0.3626.121-2", before_72_0_3626_121_2, after_72_0_3626_121_2,
+          sizeof(before_72_0_3626_121_2),  0x23bb329, FALSE },
+        { L"libcef.dll", "72.0.3626.121-3", before_72_0_3626_121_3, after_72_0_3626_121_3,
+          sizeof(before_72_0_3626_121_3),  0x23bb369, TRUE  },
+        /* libcef 72.0.3626.96 (Wizard101) */
+        { L"libcef.dll", "72.0.3626.96-1",  before_72_0_3626_121_1, after_72_0_3626_121_1,
+          sizeof(before_72_0_3626_121_1),  0x23bb82d, FALSE },
+        { L"libcef.dll", "72.0.3626.96-2",  before_72_0_3626_121_2, after_72_0_3626_121_2,
+          sizeof(before_72_0_3626_121_2),  0x23bb8a9, FALSE },
+        { L"libcef.dll", "72.0.3626.96-3",  before_72_0_3626_121_3, after_72_0_3626_121_3,
+          sizeof(before_72_0_3626_121_3),  0x23bb8e9, TRUE  },
+        /* TODO: Steam ships libcef.dll 128+. Disassemble the binary it loads
+         * (look for `mov rax,[gs:0x8]` in the .text section), then add a row
+         * here with the matching offset + before/after byte pattern. */
+    };
+
+    unsigned int i;
+    BOOL any_match = FALSE;
+    SIZE_T pagesize = page_size;
+
+    for (i = 0; i < ARRAY_SIZE(patches); i++)
+    {
+        DWORD     old_prot;
+        void     *dllbase     = (*pwm)->ldr.DllBase;
+        void     *target      = (void *)((ULONG_PTR)dllbase + patches[i].offset);
+        void     *target_page = (void *)((ULONG_PTR)target & ~(page_size - 1));
+        NTSTATUS  st;
+
+        if (wcscmp( libname, patches[i].libname ))               continue;
+        if ((*pwm)->ldr.SizeOfImage < patches[i].offset)         continue;
+        if (memcmp( target, patches[i].before, patches[i].size )) continue;
+
+        TRACE( "MNC HACK 27: patching %s %s (gs:0x8 -> gs:0x30+8)\n",
+               debugstr_w(libname), patches[i].name );
+        st = NtProtectVirtualMemory( NtCurrentProcess(), &target_page, &pagesize,
+                                     PAGE_EXECUTE_READWRITE, &old_prot );
+        if (!NT_SUCCESS(st)) continue;
+        memcpy( target, patches[i].after, patches[i].size );
+        NtProtectVirtualMemory( NtCurrentProcess(), &target_page, &pagesize, old_prot, &old_prot );
+        any_match = TRUE;
+
+        if (patches[i].stop_after_success) break;
+    }
+
+    if (!any_match)
+        FIXME( "MNC HACK 27: %s loaded but no patch matched — add a new entry for this version\n",
+               debugstr_w(libname) );
+}
+#endif
+
 /******************************************************************************
  *	load_native_dll  (internal)
  */
@@ -3538,6 +3842,16 @@ static NTSTATUS load_native_dll( LPCWSTR load_path, const UNICODE_STRING *nt_nam
 #endif
     if (NT_SUCCESS(status)) status = build_module( load_path, nt_name, &module, image_info, id,
                                                    flags, system, redirected, pwm );
+#ifdef __x86_64__
+    /* Bradar MNC HACK 27: patch out gs:0x8 reads in CEF / Qt5WebEngineCore. */
+    if (NT_SUCCESS(status) && *pwm)
+    {
+        const WCHAR *libname = wcsrchr( (*pwm)->ldr.FullDllName.Buffer, '\\' );
+        libname = libname ? libname + 1 : (*pwm)->ldr.FullDllName.Buffer;
+        if (!wcsicmp( libname, L"libcef.dll" ) || !wcsicmp( libname, L"Qt5WebEngineCore.dll" ))
+            patch_libcef( libname, pwm );
+    }
+#endif
     if (status && module) NtUnmapViewOfSection( NtCurrentProcess(), module );
     return status;
 }
@@ -3854,7 +4168,7 @@ static NTSTATUS find_builtin_without_file( const WCHAR *name, UNICODE_STRING *ne
 
     if (contains_path( name )) return status;
 
-    if (!is_prefix_bootstrap)
+    if (!is_prefix_bootstrap && !mnc_wow64_builtin_nofile())
     {
         /* 16-bit files can't be loaded from the prefix */
         if (!name[1] || wcscmp( name + wcslen(name) - 2, L"16" )) return status;
@@ -3962,6 +4276,278 @@ done:
 }
 
 /***********************************************************************
+ * MNC HACK 30 (gcenx-style steam->DXMT routing):
+ *
+ * This build ships D3DMetal as the d3d10/d3d11/d3d12/dxgi builtins (via the
+ * D3DMETAL_FB libd3dshared fallback), but Steam's CEF UI cannot render on
+ * D3DMetal.  DXMT builds are shipped alongside as d3d11_dxmt.dll /
+ * d3d10core_dxmt.dll / dxgi_dxmt.dll (+ winemetal.dll/.so), and any process
+ * belonging to the Steam client itself gets its D3D loads redirected to
+ * them.  Games and every other process keep D3DMetal.
+ * Set MNC_STEAM_DXMT=0 in the environment to disable the redirect.
+ */
+static BOOL is_steam_client_process(void)
+{
+    static int cached = -1;
+
+    if (cached == -1)
+    {
+        /* MNC: Steam's own client processes. This list is deliberately Steam-only.
+         * 2026-07-25: EA App (eadesktop.exe/ealauncher.exe/eacefsubprocess.exe) was
+         * removed from it -- the "name-list matching doesn't scale to every CEF app"
+         * concern this comment used to raise is now actually addressed: EA App launches
+         * as an ordinary "Application", which sets MNC_CEF_SAFE_MODE, and the two things
+         * this list bought it are both covered generically -- the winegstreamer block by
+         * is_cef_safe_mode() below, and the d3d->DXMT routing by MNC_GAME_BACKEND=dxmt
+         * (the backend forces dxmt for the whole force_dxmt_cef launch class). Any new
+         * CEF launcher therefore works with NO engine change. Steam still needs the list
+         * because it is launched as a launcher, not through that Application path. */
+        static const WCHAR * const steam_exes[] =
+        {
+            L"steam.exe",
+            L"steamwebhelper.exe",
+            L"steamservice.exe",
+            L"steamerrorreporter.exe",
+            L"steamerrorreporter64.exe",
+            L"gameoverlayui.exe",
+            L"streaming_client.exe",
+        };
+        RTL_USER_PROCESS_PARAMETERS *params = NtCurrentTeb()->Peb->ProcessParameters;
+        const UNICODE_STRING *img;
+        WCHAR basename[64];
+        unsigned int i, len, start;
+        int result = 0;
+
+        /* early wow64/i386 init can reach the loader before process
+         * parameters exist; don't fault (and don't cache the answer) */
+        if (!params) return FALSE;
+        img = &params->ImagePathName;
+        len = img->Length / sizeof(WCHAR);
+        start = len;
+
+        while (start > 0 && img->Buffer[start - 1] != '\\' && img->Buffer[start - 1] != '/') start--;
+        if (len - start > 0 && len - start < ARRAY_SIZE(basename))
+        {
+            memcpy( basename, img->Buffer + start, (len - start) * sizeof(WCHAR) );
+            basename[len - start] = 0;
+            for (i = 0; i < ARRAY_SIZE(steam_exes); i++)
+                if (!wcsicmp( basename, steam_exes[i] )) { result = 1; break; }
+        }
+        if (result)
+        {
+            UNICODE_STRING name, value;
+            WCHAR valbuf[4];
+
+            RtlInitUnicodeString( &name, L"MNC_STEAM_DXMT" );
+            value.Buffer = valbuf;
+            value.Length = 0;
+            value.MaximumLength = sizeof(valbuf);
+            if (!RtlQueryEnvironmentVariable_U( NULL, &name, &value ) &&
+                value.Length >= sizeof(WCHAR) && valbuf[0] == '0')
+                result = 0;
+        }
+        cached = result;
+    }
+    return cached;
+}
+
+/* MNC: generalizes the Steam/EA name-list above to any launch the backend already flagged
+ * as CEF-risky (arbitrary "Applications" added via MacNdCheese, whose CEF/Electron helper
+ * subprocesses have no fixed name to hardcode) -- set via MNC_CEF_SAFE_MODE, inherited by
+ * the whole process tree so it reaches those helpers regardless of what they're named. */
+static BOOL is_cef_safe_mode(void)
+{
+    static int cached = -1;
+
+    if (cached == -1)
+    {
+        UNICODE_STRING name, value;
+        WCHAR valbuf[4];
+
+        RtlInitUnicodeString( &name, L"MNC_CEF_SAFE_MODE" );
+        value.Buffer = valbuf;
+        value.Length = 0;
+        value.MaximumLength = sizeof(valbuf);
+        cached = (!RtlQueryEnvironmentVariable_U( NULL, &name, &value ) &&
+                  value.Length >= sizeof(WCHAR) && valbuf[0] == '1');
+    }
+    return cached;
+}
+
+/* MNC: is THIS process a CEF host (browser or helper)? Same structural test kernelbase uses
+ * for flag injection: a CEF app ships libcef.dll right next to its executable. Used to scope
+ * the DXMT d3d routing to the processes that actually need it -- see steam_dxmt_redirect().
+ * Probes the filesystem rather than the loaded-module list because the routing decision has
+ * to be made on the FIRST d3d load, which can precede libcef's own load. */
+static BOOL is_cef_host_process(void)
+{
+    static int cached = -1;
+
+    if (cached == -1)
+    {
+        RTL_USER_PROCESS_PARAMETERS *params = NtCurrentTeb()->Peb->ProcessParameters;
+        const UNICODE_STRING *img;
+        UNICODE_STRING nt_name;
+        OBJECT_ATTRIBUTES attr;
+        FILE_BASIC_INFORMATION info;
+        WCHAR path[MAX_PATH];
+        unsigned int len;
+
+        if (!params) return FALSE;     /* too early to tell; don't cache */
+        img = &params->ImagePathName;
+        len = img->Length / sizeof(WCHAR);
+        while (len > 0 && img->Buffer[len - 1] != '\\' && img->Buffer[len - 1] != '/') len--;
+        if (!len || len + ARRAY_SIZE(L"libcef.dll") > ARRAY_SIZE(path)) { cached = 0; return 0; }
+        memcpy( path, img->Buffer, len * sizeof(WCHAR) );
+        memcpy( path + len, L"libcef.dll", sizeof(L"libcef.dll") );
+
+        cached = 0;
+        if (RtlDosPathNameToNtPathName_U( path, &nt_name, NULL, NULL ))
+        {
+            InitializeObjectAttributes( &attr, &nt_name, OBJ_CASE_INSENSITIVE, 0, NULL );
+            if (!NtQueryAttributesFile( &attr, &info )) cached = 1;
+            RtlFreeUnicodeString( &nt_name );
+        }
+    }
+    return cached;
+}
+
+static const WCHAR *steam_dxmt_redirect( const WCHAR *libname )
+{
+    /* UNIFIED build (inverted): Steam exes use the DEFAULT d3d builtins, which are
+     * DXMT (system32 d3d11.dll = DXMT, kept CANONICAL "d3d11.dll" via the empty
+     * dlls/d3d11 build slot so ANGLE's GetModuleHandle("d3d11.dll") works). GAMES
+     * (every non-steam process) are routed to the D3DMetal "_d3dm" GPTK stubs in
+     * system32 -> D3DMETAL_FB -> libd3dshared. MNC_GAME_D3DMETAL=0 keeps games on DXMT. */
+    /* Bradar openxr column = the monofunc/dxmt feature-openxr d3d11 (DXMT + OpenXR passthrough
+     * via the wineopenxr bridge). VR games (MNC_GAME_BACKEND=vr) route their d3d11/dxgi/d3d10core
+     * to the _openxr builds; everythin else is untouched */
+    /* Bradar opengl column = the Wine-Devel 11.8 wined3d builtin (D3D11->wined3d->OpenGL->
+     * macOS GL, for opengl 3.2 games). MNC_GAME_BACKEND=opengl routes d3d11/dxgi/d3d10core
+     * to the _opengl builds AND their wined3d import to wined3d_opengl.dll so the 11.8 d3d11
+     * pairs with its matching 11.8 wined3d (mixing it with our 11.0 builtin wined3d = ABI break).
+     * opengl32 stays OUR 11.0 build (GL API is stable + its .so pairs with our ntdll). */
+    static const struct { const WCHAR *from; const WCHAR *d3dm; const WCHAR *dxvk; const WCHAR *dxmt; const WCHAR *openxr; const WCHAR *opengl; } map[] =
+    {
+        { L"d3d11",         L"d3d11_d3dm.dll",     L"d3d11_dxvk.dll",     L"d3d11_dxmt.dll",     L"d3d11_openxr.dll",     L"d3d11_opengl.dll" },
+        { L"d3d11.dll",     L"d3d11_d3dm.dll",     L"d3d11_dxvk.dll",     L"d3d11_dxmt.dll",     L"d3d11_openxr.dll",     L"d3d11_opengl.dll" },
+        { L"d3d10core",     L"d3d10core_d3dm.dll", L"d3d10core_dxvk.dll", L"d3d10core_dxmt.dll", L"d3d10core_openxr.dll", L"d3d10core_opengl.dll" },
+        { L"d3d10core.dll", L"d3d10core_d3dm.dll", L"d3d10core_dxvk.dll", L"d3d10core_dxmt.dll", L"d3d10core_openxr.dll", L"d3d10core_opengl.dll" },
+        { L"d3d10",         L"d3d10_d3dm.dll",     NULL,                  NULL,                  NULL,                    NULL },
+        { L"d3d10.dll",     L"d3d10_d3dm.dll",     NULL,                  NULL,                  NULL,                    NULL },
+        { L"d3d12",         L"d3d12_d3dm.dll",     NULL,                  NULL,                  NULL,                    NULL },
+        { L"d3d12.dll",     L"d3d12_d3dm.dll",     NULL,                  NULL,                  NULL,                    NULL },
+        { L"dxgi",          L"dxgi_d3dm.dll",      L"dxgi_dxvk.dll",      L"dxgi_dxmt.dll",      L"dxgi_openxr.dll",      L"dxgi_opengl.dll" },
+        { L"dxgi.dll",      L"dxgi_d3dm.dll",      L"dxgi_dxvk.dll",      L"dxgi_dxmt.dll",      L"dxgi_openxr.dll",      L"dxgi_opengl.dll" },
+        /* wined3d only rerouted for the opengl backend (the _opengl d3d11 imports it); the
+         * Metal/Vulkan backends dont touch wined3d so their columns stay NULL = canonical. */
+        { L"wined3d",       NULL,                  NULL,                  NULL,                  NULL,                    L"wined3d_opengl.dll" },
+        { L"wined3d.dll",   NULL,                  NULL,                  NULL,                  NULL,                    L"wined3d_opengl.dll" },
+    };
+    const WCHAR *base = libname, *p;
+    unsigned int i;
+    int game_dxvk = 0, game_dxmt = 0, game_openxr = 0, game_opengl = 0;  /* else d3dmetal. dxmt/dxvk/openxr/opengl route to their columns */
+
+    for (p = libname; *p; p++) if (*p == '\\' || *p == '/') base = p + 1;
+
+    /* Bradar MNC: Steam's CEF crashes once winegstreamer (the H.264/AAC Media-Foundation
+     * backend) becomes loadable, so block it for Steam processes -> CoCreateInstance
+     * fails -> Steam falls back to its bundled cef\winh264.dll. GAMES keep winegstreamer
+     * (system32) for MF video (RE-Engine intro etc). Same per-process split as d3d.
+     * is_cef_safe_mode() extends this to any CEF-safe-mode Application's own CEF
+     * helper subprocesses (see comment on that function) without needing their name added
+     * to steam_exes[] above -- gated on --type= so it never touches the Application's own
+     * top-level process or an unrelated child it spawns. */
+    /* 2026-07-25: use is_cef_safe_mode() (not a --type=-only test) so this covers the
+     * Application's OWN top-level process too, not just its --type= helpers. That top-level
+     * cover used to come from naming EADesktop.exe/EALauncher.exe in steam_exes[]; those names
+     * are gone now, so the generic flag has to carry it. Only ever true for Applications
+     * (force_dxmt_cef), never for games -- games keep winegstreamer for MF video as before. */
+    if ((is_steam_client_process() || is_cef_safe_mode()) &&
+        (!wcsicmp( base, L"winegstreamer.dll" ) || !wcsicmp( base, L"winegstreamer" )))
+    {
+        TRACE( "mnc: blocking winegstreamer for steam/cef-safe-mode %s\n", debugstr_w(libname) );
+        return L"winegstreamer_blocked_for_steam.dll";  /* non-existent -> DLL_NOT_FOUND */
+    }
+
+    /* 2026-07-28: ...and any CEF host process of a CEF-safe-mode launch, for the same reason
+     * Steam is here -- CEF cannot render on D3DMetal. This used to be done by the BACKEND
+     * forcing MNC_GAME_BACKEND=dxmt for the whole launch, which also bound the GAME: picking
+     * D3DMetal on Battlefield 4's card silently ran it on DXMT, and DXMT's dxgi is the only
+     * one of our five builds missing the private DXGID3D10CreateDevice export that wine's own
+     * d3d10 calls -> "unimplemented function, aborting" before the menu. Scoping the redirect
+     * to the CEF processes lets the game honour the backend the user actually chose, while EA
+     * App's own processes still get DXMT. Structural, no exe names. */
+    if (is_steam_client_process() || (is_cef_safe_mode() && is_cef_host_process()))
+    {
+        /* Bradar Steam -> DXMT. The canonical d3d11.dll/dxgi.dll builtins are the D3DMetal
+         * stubs (CEF cannot render on D3DMetal) so rewrite Steam d3d loads to the
+         * DXMT builds shipped as _dxmt.dll. Non-d3d libs pass through unchanged. */
+        for (i = 0; i < ARRAY_SIZE(map); i++)
+            if (!wcsicmp( base, map[i].from ) && map[i].dxmt)
+            {
+                TRACE( "mnc: routing steam %s -> %s\n", debugstr_w(libname), debugstr_w(map[i].dxmt) );
+                return map[i].dxmt;
+            }
+        return libname;
+    }
+
+    /* Bradar MNC: GAME-ONLY winegstreamer. Steam loads the literal "winegstreamer.dll" (the broken
+     * orphan in system32) -> DLL_NOT_FOUND/init-fail -> CEF falls back to bundled winh264 ->
+     * Steam stays stable on DXMT. A WORKING "winegstreamer.dll" in system32 crashed Steam, so
+     * the working build lives under "winegstreamer_game.dll" which Steam never requests; games
+     * (non-steam) get rewritten to it here. Independent of MNC_GAME_D3DMETAL (video != d3d). */
+    if (!wcsicmp( base, L"winegstreamer.dll" ) || !wcsicmp( base, L"winegstreamer" ))
+    {
+        TRACE( "mnc: routing game winegstreamer -> winegstreamer_game.dll %s\n", debugstr_w(libname) );
+        return L"winegstreamer_game.dll";
+    }
+
+    {   /* Bradar game backend: MNC_GAME_BACKEND = d3dmetal (default) | dxmt | dxvk */
+        UNICODE_STRING name, value; WCHAR valbuf[16] = {0};
+        RtlInitUnicodeString( &name, L"MNC_GAME_BACKEND" );
+        value.Buffer = valbuf; value.Length = 0; value.MaximumLength = sizeof(valbuf);
+        if (!RtlQueryEnvironmentVariable_U( NULL, &name, &value ))
+        {
+            /* Bradar dxmt games route to the _dxmt column. canonical d3d11 is the D3DMetal
+             * stub now so return-libname would give D3DMetal instead of DXMT */
+            if (!wcsicmp( valbuf, L"dxmt" )) game_dxmt = 1;
+            if (!wcsicmp( valbuf, L"dxvk" )) game_dxvk = 1;
+            /* Bradar VR games route to the openxr-DXMT build (d3d11 w/ OpenXR passthrough) */
+            if (!wcsicmp( valbuf, L"vr" ) || !wcsicmp( valbuf, L"openxr" )) game_openxr = 1;
+            /* Bradar opengl 3.2 games route to the Wine-Devel 11.8 wined3d->OpenGL build */
+            if (!wcsicmp( valbuf, L"opengl" )) game_opengl = 1;
+        }
+        else
+        {   /* Bradar back-compat: MNC_GAME_D3DMETAL=0 still means dxmt */
+            UNICODE_STRING n2, v2; WCHAR vb2[4];
+            RtlInitUnicodeString( &n2, L"MNC_GAME_D3DMETAL" );
+            v2.Buffer = vb2; v2.Length = 0; v2.MaximumLength = sizeof(vb2);
+            if (!RtlQueryEnvironmentVariable_U( NULL, &n2, &v2 ) &&
+                v2.Length >= sizeof(WCHAR) && vb2[0] == '0') game_dxmt = 1;
+        }
+    }
+    /* Bradar only remap bare names so the 12on7 agility probe path fails like on windows */
+    if (base == libname)
+    {
+        for (i = 0; i < ARRAY_SIZE(map); i++)
+        {
+            if (!wcsicmp( base, map[i].from ))
+            {
+                const WCHAR *to = game_opengl ? map[i].opengl : game_openxr ? map[i].openxr : game_dxmt ? map[i].dxmt : game_dxvk ? map[i].dxvk : map[i].d3dm;
+                if (to)
+                {
+                    TRACE( "mnc: routing game %s -> %s\n", debugstr_w(libname), debugstr_w(to) );
+                    return to;
+                }
+                break;
+            }
+        }
+    }
+    return libname;
+}
+
+/***********************************************************************
  *	find_dll_file
  *
  * Find the file (or already loaded module) for a given dll name.
@@ -3973,6 +4559,8 @@ static NTSTATUS find_dll_file( const WCHAR *load_path, const WCHAR *libname, UNI
     WCHAR *fullname = NULL;
     NTSTATUS status;
     ULONG wow64_old_value = 0;
+
+    libname = steam_dxmt_redirect( libname );
 
     *pwm = NULL;
     *redirected = FALSE;
@@ -4651,8 +5239,140 @@ extern const char * CDECL wine_get_version(void);
 /******************************************************************
  *		RtlExitUserProcess (NTDLL.@)
  */
+#ifdef _WIN64
+/* MNC diagnostic: EALaunchHelper.exe exits (cleanly, no exception -- confirmed via
+ * the crash-backtrace hook never firing for it, and via winedbg being unable to
+ * even attach before it's already gone) so fast that no external debugger --
+ * winedbg's own launch mode, or an IFEO Debugger registration (unsupported in this
+ * engine build anyway, confirmed no code path reads that registry value) -- can
+ * win the race to catch it. This hooks the actual, universal clean-exit path
+ * directly, so there's no race: whatever decided to call ExitProcess/return from
+ * main runs through here every time, at any speed. Same best-effort stack-scan
+ * technique as mnc_dump_crash_backtrace in kernelbase, standalone here since that's
+ * a different DLL. Filtered to processes whose name we're actually investigating
+ * so it doesn't fire (and spam files) for every ordinary wineboot service exit. */
+static void mnc_dump_exit_backtrace( DWORD status )
+{
+    RTL_USER_PROCESS_PARAMETERS *params = NtCurrentTeb()->Peb->ProcessParameters;
+    const UNICODE_STRING *img;
+    WCHAR basename[64];
+    unsigned int len, start;
+    WCHAR pathW[80];
+    UNICODE_STRING nt_name;
+    OBJECT_ATTRIBUTES attr;
+    IO_STATUS_BLOCK io;
+    HANDLE file;
+    CONTEXT context;
+    char buf[512];
+    int blen;
+    ULONG_PTR *stack;
+    SIZE_T i;
+    PLIST_ENTRY mark, entry;
+
+    if (!params) return;
+    img = &params->ImagePathName;
+    len = img->Length / sizeof(WCHAR);
+    start = len;
+    while (start > 0 && img->Buffer[start - 1] != '\\' && img->Buffer[start - 1] != '/') start--;
+    if (len - start == 0 || len - start >= ARRAY_SIZE(basename)) return;
+    memcpy( basename, img->Buffer + start, (len - start) * sizeof(WCHAR) );
+    basename[len - start] = 0;
+    /* 2026-07-25: was hardcoded to EALaunch/EADesktop/EACefSubProcess while the EA App
+     * clean-exit was being investigated. That is root-caused n fixed (the Rosetta-2 WoW64
+     * thunk, see dlls/wow64cpu/cpu.c), so the app names are gone -- leaving them in would
+     * keep littering C:\mnc-exit-bt-*.txt on every EA process exit for no reason. Keep the
+     * tool, just make it opt-in: set MNC_DUMP_EXIT_BT=1 to dump for EVERY process exit.
+     * Off by default, so no name list to maintain and nothing fires unless asked for. */
+    {
+        UNICODE_STRING var, val;
+        WCHAR vbuf[4];
+
+        RtlInitUnicodeString( &var, L"MNC_DUMP_EXIT_BT" );
+        val.Buffer = vbuf;
+        val.Length = 0;
+        val.MaximumLength = sizeof(vbuf);
+        if (RtlQueryEnvironmentVariable_U( NULL, &var, &val ) ||
+            val.Length < sizeof(WCHAR) || vbuf[0] != '1')
+            return;
+    }
+
+    RtlCaptureContext( &context );
+
+    swprintf( pathW, ARRAY_SIZE(pathW), L"C:\\mnc-exit-bt-%04lx.txt",
+             HandleToULong(NtCurrentTeb()->ClientId.UniqueProcess) );
+    if (!RtlDosPathNameToNtPathName_U( pathW, &nt_name, NULL, NULL )) return;
+    InitializeObjectAttributes( &attr, &nt_name, OBJ_CASE_INSENSITIVE, 0, NULL );
+    if (NtCreateFile( &file, GENERIC_WRITE | SYNCHRONIZE, &attr, &io, NULL, FILE_ATTRIBUTE_NORMAL,
+                      0, FILE_OVERWRITE_IF, FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE,
+                      NULL, 0 ))
+    {
+        RtlFreeUnicodeString( &nt_name );
+        return;
+    }
+    RtlFreeUnicodeString( &nt_name );
+
+    blen = snprintf( buf, sizeof(buf), "MNC exit backtrace: %ls exit_code=%lu\n"
+                     "rip=%016I64x rsp=%016I64x rbp=%016I64x\n\n",
+                     basename, status,
+                     (unsigned __int64)context.Rip, (unsigned __int64)context.Rsp,
+                     (unsigned __int64)context.Rbp );
+    if (blen > 0) NtWriteFile( file, NULL, NULL, NULL, &io, buf, blen, NULL, NULL );
+
+    blen = snprintf( buf, sizeof(buf), "Loaded modules:\n" );
+    if (blen > 0) NtWriteFile( file, NULL, NULL, NULL, &io, buf, blen, NULL, NULL );
+    mark = &NtCurrentTeb()->Peb->LdrData->InLoadOrderModuleList;
+    for (entry = mark->Flink; entry != mark; entry = entry->Flink)
+    {
+        LDR_DATA_TABLE_ENTRY *mod = CONTAINING_RECORD( entry, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks );
+        blen = snprintf( buf, sizeof(buf), "  %p - %p  %ls\n", mod->DllBase,
+                         (char *)mod->DllBase + mod->SizeOfImage, mod->BaseDllName.Buffer );
+        if (blen > 0) NtWriteFile( file, NULL, NULL, NULL, &io, buf, blen, NULL, NULL );
+    }
+
+    blen = snprintf( buf, sizeof(buf), "\nStack scan from rsp:\n" );
+    if (blen > 0) NtWriteFile( file, NULL, NULL, NULL, &io, buf, blen, NULL, NULL );
+    stack = (ULONG_PTR *)context.Rsp;
+    for (i = 0; i < 1024; i++)
+    {
+        ULONG_PTR val;
+        __TRY
+        {
+            val = stack[i];
+        }
+        __EXCEPT_ALL
+        {
+            blen = snprintf( buf, sizeof(buf), "  (stack read faulted at offset 0x%Ix, stopping)\n",
+                             i * sizeof(ULONG_PTR) );
+            if (blen > 0) NtWriteFile( file, NULL, NULL, NULL, &io, buf, blen, NULL, NULL );
+            break;
+        }
+        __ENDTRY
+
+        for (entry = mark->Flink; entry != mark; entry = entry->Flink)
+        {
+            LDR_DATA_TABLE_ENTRY *mod = CONTAINING_RECORD( entry, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks );
+            ULONG_PTR base = (ULONG_PTR)mod->DllBase;
+            ULONG_PTR end = base + mod->SizeOfImage;
+            if (val >= base && val < end)
+            {
+                blen = snprintf( buf, sizeof(buf), "  [rsp+0x%04Ix] = %016I64x  (%ls+0x%Ix)\n",
+                                 i * sizeof(ULONG_PTR), (unsigned __int64)val,
+                                 mod->BaseDllName.Buffer, val - base );
+                if (blen > 0) NtWriteFile( file, NULL, NULL, NULL, &io, buf, blen, NULL, NULL );
+                break;
+            }
+        }
+    }
+
+    NtClose( file );
+}
+#else
+static void mnc_dump_exit_backtrace( DWORD status ) { (void)status; }
+#endif
+
 void WINAPI RtlExitUserProcess( DWORD status )
 {
+    mnc_dump_exit_backtrace( status );
     RtlEnterCriticalSection( &loader_section );
     RtlAcquirePebLock();
     NtTerminateProcess( 0, status );

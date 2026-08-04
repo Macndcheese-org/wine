@@ -63,9 +63,45 @@ extern void WINAPI process_breakpoint(void);
 
 static inline BOOL is_valid_frame( ULONG_PTR frame )
 {
+    TEB *teb = NtCurrentTeb();
+
     if (frame & (sizeof(void*) - 1)) return FALSE;
-    return ((void *)frame >= NtCurrentTeb()->Tib.StackLimit &&
-            (void *)frame <= NtCurrentTeb()->Tib.StackBase);
+    /* SURGERY-004 (2026-05-17): cs2 (Source 2 engine) sets up SEH frames
+     * on the heap, not on the wine PE thread's stack. The strict stack-
+     * bounds check rejects every cs2 exception with "Exception frame is
+     * not in stack limits" and terminates the process before init
+     * completes. Relax to "any canonical user-space address with non-
+     * trivial size and pointer alignment". The downside is we no longer
+     * catch corrupted frames at this check — but we already permit them
+     * via the LanguageHandler validation later (signal_x86_64.c:278+)
+     * and via raise_status when the handler itself returns invalid. */
+    if (frame < 0x10000) return FALSE;
+    if (frame >= 0x800000000000ULL) return FALSE;
+    /* MNC FIX (2026-07-22): the claim above -- that later validation catches
+     * corrupted frames -- is false for RtlUnwindEx's/dispatch_exception's
+     * "hack: call builtin handlers registered in the tib list" fallback path
+     * (used whenever no unwind-table LanguageHandler is found). That path
+     * reads teb_frame->Handler directly off whatever address this function
+     * approves and calls it with zero further validation -- it never goes
+     * through the LanguageHandler check the comment above refers to, which
+     * only applies to the OTHER (table-based) branch. Concretely: a WOW64
+     * process's Tib.ExceptionList can end up holding its own TEB's address
+     * (observed live, root cause of mont127/MacNdCheese-WineEngine-PRIVATE#4)
+     * -- an 8-byte-aligned, in-range pointer that sailed straight through the
+     * checks above and got walked as if it were a real
+     * EXCEPTION_REGISTRATION_RECORD, calling whatever garbage sat at its
+     * ->Handler field and crashing on a non-executable jump target. A TEB is
+     * never itself a legitimate SEH frame (heap-allocated or otherwise), so
+     * explicitly reject the current thread's own TEB and its WOW companion
+     * TEB (if any) regardless of where they happen to sit in the canonical
+     * address range -- narrow enough to leave SURGERY-004's actual fix (heap
+     * frames elsewhere) untouched. */
+    if (frame == (ULONG_PTR)teb) return FALSE;
+    if (teb->WowTebOffset && frame == (ULONG_PTR)teb + teb->WowTebOffset) return FALSE;
+    if ((void *)frame >= NtCurrentTeb()->Tib.StackLimit &&
+        (void *)frame <= NtCurrentTeb()->Tib.StackBase) return TRUE;
+    /* Permit non-stack frames (e.g. heap-allocated SEH frames). */
+    return TRUE;
 }
 
 extern void WINAPI LdrInitializeThunk(CONTEXT*,ULONG_PTR,ULONG_PTR,ULONG_PTR);
