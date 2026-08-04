@@ -89,7 +89,14 @@ static inline GDI_HANDLE_ENTRY *handle_entry( HGDIOBJ handle )
     GDI_SHARED_MEMORY *gdi_shared = get_gdi_shared();
     unsigned int idx = LOWORD(handle);
 
-    if (idx < GDI_MAX_HANDLE_COUNT && gdi_shared->Handles[idx].Type)
+    /* MNC: gdi_shared is only set once win32u's gdi_init() has run, which is gated
+     * behind user32.dll loading and making its one-time NtUserInitializeClientPfnArrays
+     * call (see dlls/win32u/class.c init_user()/pthread_once). A thread that touches a
+     * GDI object (e.g. GetStockObject) before user32 has initialized in this process --
+     * seen with CEF/DXMT-routed worker threads that never load user32 at all -- previously
+     * dereferenced this NULL pointer unconditionally and crashed with an unhandled page
+     * fault at a near-null address. Treat "not ready yet" the same as "invalid handle". */
+    if (gdi_shared && idx < GDI_MAX_HANDLE_COUNT && gdi_shared->Handles[idx].Type)
     {
         if (!HIWORD( handle ) || HIWORD( handle ) == gdi_shared->Handles[idx].Unique)
             return &gdi_shared->Handles[idx];
@@ -438,7 +445,14 @@ HGDIOBJ WINAPI DECLSPEC_HOTPATCH GetStockObject( INT obj )
         break;
     }
 
-    return entry_to_handle( handle_entry( ULongToHandle( obj + FIRST_GDI_HANDLE )));
+    {
+        /* MNC: handle_entry() can legitimately return NULL here if gdi_shared isn't
+         * set up yet (see the comment in handle_entry()) -- entry_to_handle() derefs
+         * its argument unconditionally, so guard the same way get_object_type() etc
+         * already do rather than crashing on a NULL entry. */
+        GDI_HANDLE_ENTRY *entry = handle_entry( ULongToHandle( obj + FIRST_GDI_HANDLE ));
+        return entry ? entry_to_handle( entry ) : 0;
+    }
 }
 
 /***********************************************************************

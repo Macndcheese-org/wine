@@ -59,7 +59,12 @@ static inline GDI_HANDLE_ENTRY *handle_entry( HGDIOBJ handle )
 {
     unsigned int idx = LOWORD(handle);
 
-    if (idx < GDI_MAX_HANDLE_COUNT && gdi_shared->Handles[idx].Type)
+    /* MNC: gdi_shared is only set once gdi_init() has run (pthread_once, gated behind
+     * user32's NtUserInitializeClientPfnArrays call -- see init_user() in class.c). A
+     * syscall reaching this before any thread in the process has loaded/initialized
+     * user32.dll would otherwise dereference gdi_shared as NULL here. Mirrors the same
+     * guard added to gdi32.dll's own copy of handle_entry() in dlls/gdi32/objects.c. */
+    if (gdi_shared && idx < GDI_MAX_HANDLE_COUNT && gdi_shared->Handles[idx].Type)
     {
         if (!HIWORD( handle ) || HIWORD( handle ) == gdi_shared->Handles[idx].Unique)
             return &gdi_shared->Handles[idx];
@@ -606,7 +611,13 @@ HGDIOBJ WINAPI GetStockObject( INT obj )
         break;
     }
 
-    return entry_to_handle( handle_entry( ULongToHandle( obj + FIRST_GDI_HANDLE )));
+    /* MNC: handle_entry() can legitimately return NULL if gdi_shared isn't set up yet
+     * (see the comment on handle_entry() above) -- guard the same way the other
+     * handle_entry() callers in this file already do rather than crashing here. */
+    {
+        GDI_HANDLE_ENTRY *entry = handle_entry( ULongToHandle( obj + FIRST_GDI_HANDLE ));
+        return entry ? entry_to_handle( entry ) : 0;
+    }
 }
 
 static void init_stock_objects( unsigned int dpi )
