@@ -559,16 +559,18 @@ static const WCHAR *hack_append_command_line( const WCHAR *cmd, const WCHAR *cmd
     }
     options[] =
     {
-        {L"steamwebhelper.exe", L" --in-process-gpu", NULL, L"--type=crashpad-handler"},
-        {L"Battle.net.exe", L" --in-process-gpu", NULL, NULL},
+        /* MNC: the GPU entries this table shipped with are gone -- steamwebhelper,
+         * Battle.net, GalaxyClient (+2 GOG helpers), RSI Launcher, EADesktop and Link2EA.
+         * CEF/GPU switches come from one place now: the MNC_WEBHELPER_FLAGS block further
+         * down, which picks its targets structurally (a libcef.dll sat beside the exe, or
+         * a Chromium --type= child under a CEF-safe-mode launch) rather than from a name
+         * list, and hands over the full ANGLE -> d3d11 -> DXMT set plus the adapter spoof
+         * instead of --in-process-gpu alone. For the three this table and that block both
+         * matched, its version was a strict subset appended just ahead of the real one.
+         *
+         * What stays is the CD Projekt launcher skip, which is not a CEF concern at all. */
         {L"redprelauncher.exe", L" --launcher-skip", NULL, NULL},
         {L"REDprelauncher.exe", L" --launcher-skip", NULL, NULL},
-        {L"GalaxyClient.exe", L" --in-process-gpu", NULL, L"--type=crashpad-handler"},
-        {L"GalaxyClient Helper.exe", L" --in-process-gpu", NULL, L"--type=crashpad-handler"},
-        {L"GOG Galaxy Notifications Renderer.exe", L" --in-process-gpu", NULL, L"--type=crashpad-handler"},
-        {L"RSI Launcher.exe", L" --no-deprecation --in-process-gpu --log-level=3 ", NULL, NULL},
-        {L"EADesktop.exe", L" --disable-gpu --no-sandbox --in-process-gpu", NULL, L"--type=crashpad-handler"},
-        {L"Link2EA.exe", L" --disable-gpu --no-sandbox --in-process-gpu", NULL, L"--type=crashpad-handler"},
     };
     unsigned int i;
 
@@ -585,6 +587,53 @@ static const WCHAR *hack_append_command_line( const WCHAR *cmd, const WCHAR *cmd
         }
     }
     return NULL;
+}
+
+/* MNC: generalizes the steamwebhelper.exe/EADesktop.exe-etc name checks below to any launch
+ * the backend already flagged as CEF-risky via MNC_CEF_SAFE_MODE (arbitrary "Applications"
+ * added through MacNdCheese, whose CEF/Electron helper subprocesses have no fixed name to
+ * hardcode) -- inherited by the whole process tree, same mechanism as ntdll/loader.c's own
+ * copy of this helper (separate DLL, can't share the static). */
+static BOOL is_cef_safe_mode(void)
+{
+    char buf[4];
+    DWORD len = GetEnvironmentVariableA( "MNC_CEF_SAFE_MODE", buf, sizeof(buf) );
+    return len > 0 && buf[0] == '1';
+}
+
+/* MNC: does this child look like a CEF *browser* process?
+ *
+ * Chromium marks its own helper children with --type= (renderer/gpu-process/utility/
+ * zygote), and the gates below key off that. But the process that must actually RECEIVE
+ * the GPU-spoof switches and --single-process is the BROWSER process -- the one that owns
+ * the window and spawns those helpers -- and it has no --type= of its own. Chromium only
+ * ever propagates switches downward, so a switch that misses the browser misses the whole
+ * tree. Live-confirmed with EA App: EALaunchHelper.exe builds its EADesktop.exe command
+ * line from scratch ("-updater_call -ls=LaunchHelper -gameSdkPort=<port>", its own log),
+ * dropping every switch it was itself given, so EADesktop came up bare -> CEF ran
+ * multi-process -> the GPU subprocess crash-looped (cef.log: "GPU process exited
+ * unexpectedly: exit_code=3" x6, "Failed to send GpuControl.CreateCommandBuffer") -> the
+ * content pane never painted, just the empty blue window.
+ *
+ * Detect the browser structurally rather than by exe name: a CEF app ships libcef.dll
+ * right next to its executable. That is what makes it CEF, so it needs no per-app list
+ * and works for any launcher. It also cannot repeat the regedit.exe misparse the --type=
+ * restriction was added for: system32 helpers have no libcef.dll beside them. */
+static BOOL is_cef_host_image( const WCHAR *app_name )
+{
+    static const WCHAR libcefW[] = L"libcef.dll";
+    WCHAR path[MAX_PATH];
+    UINT len, dir;
+
+    if (!app_name) return FALSE;
+    len = lstrlenW( app_name );
+    if (!len || len >= ARRAY_SIZE(path)) return FALSE;
+    for (dir = len; dir > 0; dir--) if (app_name[dir - 1] == '\\' || app_name[dir - 1] == '/') break;
+    if (!dir) return FALSE;                       /* bare name -> no directory to probe */
+    if (dir + ARRAY_SIZE(libcefW) > ARRAY_SIZE(path)) return FALSE;
+    memcpy( path, app_name, dir * sizeof(WCHAR) );
+    memcpy( path + dir, libcefW, sizeof(libcefW) );
+    return GetFileAttributesW( path ) != INVALID_FILE_ATTRIBUTES;
 }
 
 /**********************************************************************
@@ -661,6 +710,110 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR 
     /* end CROSSOVER HACK */
 
     TRACE( "app %s cmdline %s after all hacks\n", debugstr_w(app_name), debugstr_w(tidy_cmdline) );
+    /* MNC: append extra CEF switches to steamwebhelper.exe, the Rockstar SocialClubHelper.exe,
+     * or (via is_cef_safe_mode()) ANY child process spawned under a CEF-safe-mode Application
+     * launch, from MNC_WEBHELPER_FLAGS.
+     * 2026-07-25: EA App's EADesktop.exe/EALauncher.exe/EACefSubProcess.exe used to be named
+     * here too; they are gone now -- EA App launches as an ordinary "Application", so
+     * is_cef_safe_mode() covers its whole process tree, and is_cef_host_image() covers the
+     * browser process the way naming EADesktop.exe used to. (The backend also puts these on
+     * the argv of the exe IT starts, but that only covers apps we start directly: a launcher
+     * chain -- EALauncher.exe -> EALaunchHelper.exe -> EADesktop.exe -- rebuilds its child's
+     * command line, so the real browser process is reached only through this hook.)
+     * One less per-app name list to maintain
+     * (space-separated, ASCII). All are CEF UIs whos GPU proc crashes on a null GPU under
+     * DXMT/SwiftShader; the spoof flags hand them a fake AMD adapter so the renderer sub-proc
+     * actualy spawns insted of dying (RGL needs its Social Club login webview to paint or it
+     * exits; EA App needs it to paint its own login/store webview the same way). Lets us drive
+     * CEF's GPU onto ANGLE->d3d11->DXMT (or software) without hardcoding a hack. Never touch
+     * the crashpad-handler. */
+    {
+        char wf[900];
+        DWORD wflen = GetEnvironmentVariableA( "MNC_WEBHELPER_FLAGS", wf, sizeof(wf) );
+        if (wflen > 0 && wflen < sizeof(wf) && wf[0] && app_name && tidy_cmdline
+            /* MNC FIX: is_cef_safe_mode() alone is too broad -- it's set for the WHOLE
+             * process tree of a CEF-safe-mode Application, including ordinary non-CEF
+             * children it spawns (e.g. an installer shelling out to regedit.exe to import
+             * a .reg file). Confirmed live: a VS Code installer's regedit.exe registry-
+             * import step got these flags appended, and regedit doesn't understand "--"
+             * style flags -- it misread the first one ("--no-sandbox") as a .reg file path
+             * and errored "file not found". Chromium/CEF always launches its own renderer/
+             * gpu-process/utility/zygote children with a --type= argument (the standard
+             * convention); require that too so this only ever matches an actual CEF
+             * subprocess, never an unrelated helper like regedit. */
+            /* 2026-07-25: ...OR the CEF browser process itself (is_cef_host_image), which has
+             * no --type= but is the one process that has to get these -- see that helper. */
+            && ((is_cef_safe_mode() && (wcsstr( tidy_cmdline, L"--type=" ) || is_cef_host_image( app_name )))
+                || wcsstr( app_name, L"steamwebhelper.exe" ) || wcsstr( app_name, L"SocialClubHelper.exe" ))
+            /* deliberately NOT skipped when the switches are already present: a launcher that
+             * forwards its own argv (EALauncher.exe -> EALaunchHelper.exe) then gets a second
+             * copy, which Chromium is fine with (last wins). Skipping on "first switch already
+             * there" would silently drop the WHOLE set for any CEF host that happens to pass
+             * --no-sandbox itself -- Steam's webhelper plausibly does, and losing the GPU spoof
+             * there means a blank Steam UI. Untidy beats a silent regression. */
+            && !wcsstr( tidy_cmdline, L"--type=crashpad-handler" ))
+        {
+            DWORD i, base = lstrlenW( tidy_cmdline );
+            WCHAR *nc = RtlAllocateHeap( GetProcessHeap(), 0, (base + wflen + 2) * sizeof(WCHAR) );
+            if (nc)
+            {
+                memcpy( nc, tidy_cmdline, base * sizeof(WCHAR) );
+                nc[base] = ' ';
+                for (i = 0; i < wflen; i++) nc[base + 1 + i] = (WCHAR)(unsigned char)wf[i];
+                nc[base + 1 + wflen] = 0;
+                if (tidy_cmdline != cmd_line) RtlFreeHeap( GetProcessHeap(), 0, tidy_cmdline );
+                tidy_cmdline = nc;
+                FIXME( "MNC: CEF webhelper flags appended: %s\n", debugstr_w(nc) );
+            }
+        }
+    }
+
+    /* MNC: optional extra switches for a CEF-safe-mode launch, from
+     * MNC_EA_WEBHELPER_EXTRA_FLAGS. Nothing sets this by default any more -- it is a manual
+     * escape hatch for a CEF app that needs something extra, kept because it costs nothing
+     * and needs no per-app name list.
+     *
+     * 2026-07-25: it used to default to "--single-process", on the theory that a
+     * multi-process CEF app's GPU subprocess would build a Metal swapchain for a HWND owned
+     * by a different process, which DXMT rejects ("cross-process swapchain not supported
+     * yet", d3d11_swapchain.cpp). Measured on EA App, and that was wrong twice over:
+     *
+     *  - It was never needed. --in-process-gpu (already in MNC_WEBHELPER_FLAGS) puts the GPU
+     *    in the browser process, which is the process that owns the HWND, so ordinary
+     *    multi-process CEF gives zero GPU-process crashes, zero cross-process swapchain
+     *    rejections and zero "Failed to get metal layer". The blue-window run that motivated
+     *    --single-process had NO flags at all on its command line, so --in-process-gpu had
+     *    never actually been tested on its own.
+     *  - It actively broke the app. Collapsing the renderer into the browser process means
+     *    the renderer-side OnContextCreated that injects a JS<->native bridge never runs; EA
+     *    App's page then saw `qt` undefined, fell back to a WebSocket nothing listens on, and
+     *    hung 30s before leaving the UI stuck on the login page. CEF documents single-process
+     *    as debug-only.
+     *
+     * Same gating as the MNC_WEBHELPER_FLAGS block above (--type= helper OR the CEF browser
+     * process itself), for the same reasons. */
+    {
+        char ef[300];
+        DWORD eflen = GetEnvironmentVariableA( "MNC_EA_WEBHELPER_EXTRA_FLAGS", ef, sizeof(ef) );
+        if (eflen > 0 && eflen < sizeof(ef) && ef[0] && app_name && tidy_cmdline
+            && is_cef_safe_mode()
+            && (wcsstr( tidy_cmdline, L"--type=" ) || is_cef_host_image( app_name ))
+            && !wcsstr( tidy_cmdline, L"--type=crashpad-handler" ))
+        {
+            DWORD i, base = lstrlenW( tidy_cmdline );
+            WCHAR *nc = RtlAllocateHeap( GetProcessHeap(), 0, (base + eflen + 2) * sizeof(WCHAR) );
+            if (nc)
+            {
+                memcpy( nc, tidy_cmdline, base * sizeof(WCHAR) );
+                nc[base] = ' ';
+                for (i = 0; i < eflen; i++) nc[base + 1 + i] = (WCHAR)(unsigned char)ef[i];
+                nc[base + 1 + eflen] = 0;
+                if (tidy_cmdline != cmd_line) RtlFreeHeap( GetProcessHeap(), 0, tidy_cmdline );
+                tidy_cmdline = nc;
+                FIXME( "MNC: EA webhelper extra flags appended: %s\n", debugstr_w(nc) );
+            }
+        }
+    }
 
     /* Warn if unsupported features are used */
 
