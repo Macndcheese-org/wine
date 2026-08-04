@@ -1031,7 +1031,7 @@ done:
 /******************************************************************************
  *              NtCreateSemaphore (NTDLL.@)
  */
-NTSTATUS WINAPI NtCreateSemaphore( HANDLE *handle, ACCESS_MASK access, const OBJECT_ATTRIBUTES *attr,
+NTSTATUS WINAPI GPT_IMPORT(NtCreateSemaphore)( HANDLE *handle, ACCESS_MASK access, const OBJECT_ATTRIBUTES *attr,
                                    LONG initial, LONG max )
 {
     unsigned int ret;
@@ -1059,6 +1059,17 @@ NTSTATUS WINAPI NtCreateSemaphore( HANDLE *handle, ACCESS_MASK access, const OBJ
     free( objattr );
     return ret;
 }
+
+/* MNC HACK 17: ms_abi shim for callers inside libd3dshared.dylib. */
+#if defined(__APPLE__) && defined(__x86_64__)
+NTSTATUS __attribute__((ms_abi)) msthunk_NtCreateSemaphore( HANDLE *handle, ACCESS_MASK access,
+                                                            const OBJECT_ATTRIBUTES *attr,
+                                                            LONG initial, LONG max )
+{
+    return sysv_NtCreateSemaphore( handle, access, attr, initial, max );
+}
+GPT_ABI_WRAPPER( NtCreateSemaphore );
+#endif
 
 
 /******************************************************************************
@@ -1131,7 +1142,7 @@ NTSTATUS WINAPI NtQuerySemaphore( HANDLE handle, SEMAPHORE_INFORMATION_CLASS cla
 /******************************************************************************
  *              NtReleaseSemaphore (NTDLL.@)
  */
-NTSTATUS WINAPI NtReleaseSemaphore( HANDLE handle, ULONG count, ULONG *previous )
+NTSTATUS WINAPI GPT_IMPORT(NtReleaseSemaphore)( HANDLE handle, ULONG count, ULONG *previous )
 {
     unsigned int ret;
 
@@ -1153,11 +1164,20 @@ NTSTATUS WINAPI NtReleaseSemaphore( HANDLE handle, ULONG count, ULONG *previous 
     return ret;
 }
 
+/* MNC HACK 17: ms_abi shim for callers inside libd3dshared.dylib. */
+#if defined(__APPLE__) && defined(__x86_64__)
+NTSTATUS __attribute__((ms_abi)) msthunk_NtReleaseSemaphore( HANDLE handle, ULONG count, ULONG *previous )
+{
+    return sysv_NtReleaseSemaphore( handle, count, previous );
+}
+GPT_ABI_WRAPPER( NtReleaseSemaphore );
+#endif
+
 
 /**************************************************************************
  *              NtCreateEvent (NTDLL.@)
  */
-NTSTATUS WINAPI NtCreateEvent( HANDLE *handle, ACCESS_MASK access, const OBJECT_ATTRIBUTES *attr,
+NTSTATUS WINAPI GPT_IMPORT(NtCreateEvent)( HANDLE *handle, ACCESS_MASK access, const OBJECT_ATTRIBUTES *attr,
                                EVENT_TYPE type, BOOLEAN state )
 {
     unsigned int ret;
@@ -1185,6 +1205,17 @@ NTSTATUS WINAPI NtCreateEvent( HANDLE *handle, ACCESS_MASK access, const OBJECT_
     free( objattr );
     return ret;
 }
+
+/* MNC HACK 17: ms_abi shim for callers inside libd3dshared.dylib. */
+#if defined(__APPLE__) && defined(__x86_64__)
+NTSTATUS __attribute__((ms_abi)) msthunk_NtCreateEvent( HANDLE *handle, ACCESS_MASK access,
+                                                       const OBJECT_ATTRIBUTES *attr,
+                                                       EVENT_TYPE type, BOOLEAN state )
+{
+    return sysv_NtCreateEvent( handle, access, attr, type, state );
+}
+GPT_ABI_WRAPPER( NtCreateEvent );
+#endif
 
 
 /******************************************************************************
@@ -1217,7 +1248,7 @@ NTSTATUS WINAPI NtOpenEvent( HANDLE *handle, ACCESS_MASK access, const OBJECT_AT
 /******************************************************************************
  *              NtSetEvent (NTDLL.@)
  */
-NTSTATUS WINAPI NtSetEvent( HANDLE handle, LONG *prev_state )
+NTSTATUS WINAPI GPT_IMPORT(NtSetEvent)( HANDLE handle, LONG *prev_state )
 {
     unsigned int ret;
 
@@ -1237,6 +1268,15 @@ NTSTATUS WINAPI NtSetEvent( HANDLE handle, LONG *prev_state )
     return ret;
 }
 
+/* MNC HACK 17: ms_abi shim for callers inside libd3dshared.dylib. */
+#if defined(__APPLE__) && defined(__x86_64__)
+NTSTATUS __attribute__((ms_abi)) msthunk_NtSetEvent( HANDLE handle, LONG *prev_state )
+{
+    return sysv_NtSetEvent( handle, prev_state );
+}
+GPT_ABI_WRAPPER( NtSetEvent );
+#endif
+
 
 /******************************************************************************
  *              NtSetEventBoostPriority (NTDLL.@)
@@ -1250,7 +1290,7 @@ NTSTATUS WINAPI NtSetEventBoostPriority( HANDLE handle )
 /******************************************************************************
  *              NtResetEvent (NTDLL.@)
  */
-NTSTATUS WINAPI NtResetEvent( HANDLE handle, LONG *prev_state )
+NTSTATUS WINAPI GPT_IMPORT(NtResetEvent)( HANDLE handle, LONG *prev_state )
 {
     unsigned int ret;
 
@@ -1270,21 +1310,39 @@ NTSTATUS WINAPI NtResetEvent( HANDLE handle, LONG *prev_state )
     return ret;
 }
 
+/* MNC HACK 17: ms_abi shim for callers inside libd3dshared.dylib. */
+#if defined(__APPLE__) && defined(__x86_64__)
+NTSTATUS __attribute__((ms_abi)) msthunk_NtResetEvent( HANDLE handle, LONG *prev_state )
+{
+    return sysv_NtResetEvent( handle, prev_state );
+}
+GPT_ABI_WRAPPER( NtResetEvent );
+#endif
+
 
 /******************************************************************************
  *              NtClearEvent (NTDLL.@)
  */
-NTSTATUS WINAPI NtClearEvent( HANDLE handle )
+NTSTATUS WINAPI GPT_IMPORT(NtClearEvent)( HANDLE handle )
 {
     /* FIXME: same as NtResetEvent ??? */
     return NtResetEvent( handle, NULL );
 }
 
+/* MNC HACK 17: ms_abi shim for callers inside libd3dshared.dylib. */
+#if defined(__APPLE__) && defined(__x86_64__)
+NTSTATUS __attribute__((ms_abi)) msthunk_NtClearEvent( HANDLE handle )
+{
+    return sysv_NtClearEvent( handle );
+}
+GPT_ABI_WRAPPER( NtClearEvent );
+#endif
+
 
 /******************************************************************************
  *              NtPulseEvent (NTDLL.@)
  */
-NTSTATUS WINAPI NtPulseEvent( HANDLE handle, LONG *prev_state )
+NTSTATUS WINAPI GPT_IMPORT(NtPulseEvent)( HANDLE handle, LONG *prev_state )
 {
     unsigned int ret;
 
@@ -1303,6 +1361,15 @@ NTSTATUS WINAPI NtPulseEvent( HANDLE handle, LONG *prev_state )
     SERVER_END_REQ;
     return ret;
 }
+
+/* MNC HACK 17: ms_abi shim for callers inside libd3dshared.dylib. */
+#if defined(__APPLE__) && defined(__x86_64__)
+NTSTATUS __attribute__((ms_abi)) msthunk_NtPulseEvent( HANDLE handle, LONG *prev_state )
+{
+    return sysv_NtPulseEvent( handle, prev_state );
+}
+GPT_ABI_WRAPPER( NtPulseEvent );
+#endif
 
 
 /******************************************************************************
@@ -3656,13 +3723,64 @@ NTSTATUS WINAPI NtWaitForAlertByThreadId( const void *address, const LARGE_INTEG
 
     TRACE( "%p %s\n", address, debugstr_timeout( timeout ) );
 
+    /* SURGERY-001 (2026-05-16): comprehensive logging of every wait. We need
+     * to know WHICH wait is blocking cs2 main thread under wine-d3dmetal so
+     * we can find the corresponding signaler that never fires. Log to a
+     * separate file to avoid interleaving with WINEDEBUG. */
+    {
+        static int g_log_fd = -1;
+        static volatile int g_log_init = 0;
+        if (!g_log_init) {
+            g_log_init = 1;
+            /* default OFF: per-wait file I/O is too costly in the hot path.
+             * set WINE_WAIT_LOG=1 to capture the alert-wait trace for diagnosis. */
+            if (getenv("WINE_WAIT_LOG"))
+                g_log_fd = open("/tmp/wine_waits.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+        }
+        if (g_log_fd >= 0) {
+            char buf[256];
+            int n = snprintf(buf, sizeof(buf),
+                "[wait] tid=%lx addr=%p caller=%p timeout=%lld\n",
+                (unsigned long)(uintptr_t)NtCurrentTeb()->ClientId.UniqueThread,
+                address, __builtin_return_address(0),
+                timeout ? (long long)timeout->QuadPart : 0LL);
+            write(g_log_fd, buf, n);
+        }
+    }
+
     if (!entry) return STATUS_INVALID_CID;
 
 #ifdef USE_FUTEX
     {
         LONG *futex = &entry->futex;
-        ULONGLONG end;
-        int ret;
+        ULONGLONG end = 0;
+        long poll_ns, max_ns;
+        /* MNC wake-drop fix (2026-06-26): under Rosetta the macOS futex wake
+         * (os_sync_wake_by_address_any / __ulock_wake) is unreliable -
+         * NtAlertThreadByThreadId sets futex=1 then wakes, but the parked
+         * waiter is often NOT woken, so it stalls the FULL timeout even though
+         * the flag is already set. Observed as repeated 5s finite waits during
+         * WoW64 prefix creation = ~270s of 0%-CPU blocked waits.
+         * Fix: cap each wait at a short backing-off poll and let the loop's
+         * InterlockedExchange re-check the futex. A dropped wake is then seen
+         * as futex==1 on the next poll and returns STATUS_ALERTED CORRECTLY.
+         * It is NEVER spurious (we return ALERTED only when the flag was really
+         * set), so Steam-CEF is safe - unlike the old SURGERY-005 cap which
+         * faked STATUS_ALERTED and crashed steam.exe. Covers finite and
+         * infinite waits. Reliable wakes still return immediately with no added
+         * latency. Auto-ON during prefix bootstrap only: the launcher exports
+         * MNC_FAST_RPC_BOOT=1 for `wineboot -u` (paired with the rpcrt4
+         * fast-RPC gate), which the bootstrap alert-wake-drop needs to avoid
+         * ~180s of stalls. OFF otherwise so Steam/runtime is byte-for-byte
+         * vanilla. Explicit WINE_ALERT_POLL_MS=N overrides in any context
+         * (e.g. =100 to enable the wake-drop poll for cs2/RE4). */
+        static int g_poll_max_ms = -1;
+        if (g_poll_max_ms == -1) {
+            const char *e = getenv("WINE_ALERT_POLL_MS");
+            g_poll_max_ms = (e && *e) ? atoi(e) : 0;  /* default OFF = vanilla wait; not part of the prefix fix */
+        }
+        max_ns = (long)g_poll_max_ms * 1000000L;
+        poll_ns = 1000000L; /* start at 1ms, back off to the ceiling */
 
         if (timeout)
         {
@@ -3674,19 +3792,41 @@ NTSTATUS WINAPI NtWaitForAlertByThreadId( const void *address, const LARGE_INTEG
 
         while (!InterlockedExchange( futex, 0 ))
         {
+            struct timespec ts;
+            LONGLONG timeleft = 0;
+            long want_ns;
+
             if (timeout)
             {
-                LONGLONG timeleft = update_timeout( end );
-                struct timespec timespec;
-
-                timespec.tv_sec = timeleft / (ULONGLONG)TICKSPERSEC;
-                timespec.tv_nsec = (timeleft % TICKSPERSEC) * 100;
-                ret = futex_wait( futex, 0, &timespec );
+                timeleft = update_timeout( end );
+                if (timeleft <= 0) return STATUS_TIMEOUT;
             }
-            else
-                ret = futex_wait( futex, 0, NULL );
 
-            if (ret == -1 && errno == ETIMEDOUT) return STATUS_TIMEOUT;
+            if (g_poll_max_ms <= 0)
+            {
+                /* poll disabled: plain blocking wait (full remaining / infinite) */
+                if (timeout)
+                {
+                    ts.tv_sec  = timeleft / (ULONGLONG)TICKSPERSEC;
+                    ts.tv_nsec = (timeleft % TICKSPERSEC) * 100;
+                    if (futex_wait( futex, 0, &ts ) == -1 && errno == ETIMEDOUT)
+                        return STATUS_TIMEOUT;
+                }
+                else
+                    futex_wait( futex, 0, NULL );
+                continue;
+            }
+
+            /* capped, backing-off poll so a dropped wake is caught within poll_ns;
+             * never wait past the real deadline */
+            want_ns = poll_ns;
+            if (timeout && timeleft * 100 < want_ns) want_ns = (long)(timeleft * 100);
+            ts.tv_sec  = want_ns / 1000000000L;
+            ts.tv_nsec = want_ns % 1000000000L;
+            futex_wait( futex, 0, &ts );
+            /* ETIMEDOUT here just means the poll elapsed; loop and re-check the
+             * futex. Only the real deadline (above) returns STATUS_TIMEOUT. */
+            if (poll_ns < max_ns) { poll_ns <<= 1; if (poll_ns > max_ns) poll_ns = max_ns; }
         }
         return STATUS_ALERTED;
     }

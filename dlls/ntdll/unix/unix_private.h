@@ -181,7 +181,14 @@ struct pe_mapping_info
 static const SIZE_T page_size = 0x1000;
 static const SIZE_T signal_stack_mask = 0xffff;
 static const SIZE_T signal_stack_size = 0x10000 - offsetof( struct thread_data, signal_stack );
-static const SIZE_T kernel_stack_size = 0x100000;
+/* PATCH-020: bumped from 0x100000 (1 MB) to 0x400000 (4 MB) — libmetalirconverter
+ * deeply recurses into Metal IR compilation on its way to setting up D3DMetal
+ * shaders, exhausting the wine kernel stack. CS2's first DXGI factory creation
+ * fault-traced inside a `rep movsq` at libmetalirconverter+0x3935 with rsp just
+ * past the end of a 1 MB stack (stack-grow fixups had walked rsp from 0xfd60
+ * down to 0x3d40 = ~49 KB used in this chain alone, on top of whatever was
+ * already on stack from the prior call chain). 4 MB is comfortable headroom. */
+static const SIZE_T kernel_stack_size = 0x400000;
 static const SIZE_T min_kernel_stack  = 0x2000;
 static const LONG teb_offset = 0x2000;
 
@@ -741,5 +748,50 @@ static inline int is_gdt_sel( WORD sel )
 }
 
 #endif  /* defined(__i386__) || defined(__x86_64__) */
+
+/* MNC HACK 17 (2026-05-18): caller-IP-routed ms_abi/sysv_abi bridge
+ * for the handful of NT syscalls that GPTK's libd3dshared.dylib calls
+ * back into. libd3dshared is compiled as Apple-native ms_abi code;
+ * wine's NT syscalls are sysv_abi. The two ABIs differ on which
+ * callee-saved registers are preserved (ms: RBX/RBP/RDI/RSI/R12-R15;
+ * sysv: RBX/RBP/R12-R15) and on argument register order (ms uses
+ * RCX/RDX/R8/R9; sysv uses RDI/RSI/RDX/RCX). A direct ms→sysv call
+ * either passes garbage args or clobbers the caller's RDI/RSI. The
+ * GPT_ABI_WRAPPER assembly trampoline checks if the return address
+ * is inside the loaded libd3dshared range, jumping to an ms_abi-
+ * decorated msthunk_NAME wrapper when so, or to the original sysv
+ * implementation otherwise (so non-D3DMetal callers are unaffected). */
+#if defined(__APPLE__) && defined(__x86_64__)
+#include <wine/asm.h>
+
+extern void *libd3dshared_load_addr, *libd3dshared_code_end;
+
+#define GPT_IMPORT(name) sysv_##name
+#define GPT_ABI_WRAPPER(name) \
+    asm(".text\n\t" \
+        ".align 4\n\t" \
+        ".globl " __ASM_NAME(#name) "\n\t" \
+        __ASM_NAME(#name) ":\n\t" \
+        "push %rax\n\t" \
+        "push %rcx\n\t" \
+        "movq " __ASM_NAME("libd3dshared_load_addr") "@GOTPCREL(%rip), %rax\n\t" \
+        "cmpq $0, (%rax)\n\t" \
+        "je " __ASM_LOCAL_LABEL("mnc17_jmp_sysv_" #name) "\n\t" \
+        "movq 16(%rsp), %rcx\n\t" \
+        "cmpq (%rax), %rcx\n\t" \
+        "jb " __ASM_LOCAL_LABEL("mnc17_jmp_sysv_" #name) "\n\t" \
+        "movq " __ASM_NAME("libd3dshared_code_end") "@GOTPCREL(%rip), %rax\n\t" \
+        "cmpq (%rax), %rcx\n\t" \
+        "ja " __ASM_LOCAL_LABEL("mnc17_jmp_sysv_" #name) "\n\t" \
+        "pop %rcx\n\t" \
+        "pop %rax\n\t" \
+        "jmp " __ASM_NAME("msthunk_" #name) "\n\t" \
+        __ASM_LOCAL_LABEL("mnc17_jmp_sysv_" #name) ":\n\t" \
+        "pop %rcx\n\t" \
+        "pop %rax\n\t" \
+        "jmp " __ASM_NAME("sysv_" #name) "\n\t" );
+#else
+#define GPT_IMPORT(name) name
+#endif
 
 #endif /* __NTDLL_UNIX_PRIVATE_H */

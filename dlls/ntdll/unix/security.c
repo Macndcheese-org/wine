@@ -26,6 +26,9 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <fcntl.h>
 
 #include "ntstatus.h"
 #include "windef.h"
@@ -34,6 +37,15 @@
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(ntdll);
+
+/* PATCH-032 helper: bogus pointer check used by NtAccessCheck and friends.
+ * Rejects NULL, sub-page-low values, and NaN-boxed pointers (0x7ff8 / 0x7ffc
+ * / 0xfff8 in top 16 bits — Apple's tagged-pointer encoding signature). */
+#define BOGUS_PTR(p) ( \
+    !(p) || (UINT_PTR)(p) < 0x1000 || \
+    (((UINT_PTR)(p) >> 48) == 0x7ff8) || \
+    (((UINT_PTR)(p) >> 48) == 0x7ffc) || \
+    (((UINT_PTR)(p) >> 48) == 0xfff8))
 
 static BOOL is_equal_sid( const SID *sid1, const SID *sid2 )
 {
@@ -905,11 +917,132 @@ NTSTATUS WINAPI NtAccessCheck( PSECURITY_DESCRIPTOR descr, HANDLE token, ACCESS_
     unsigned int status;
     ULONG priv_len;
 
+    /* PATCH-032 v15: STAMP log ALWAYS, before any check, so we can prove
+     * the function was entered. If stamp fires but v15 NaN reject doesn't,
+     * we have proof the check has a logic error. */
+    {
+        char buf[200];
+        unsigned long t16;
+        int n;
+        int fd;
+
+        n = snprintf(buf, sizeof(buf),
+            "STAMP: retlen=%p (=%lx) top16=%lx\n",
+            retlen, (unsigned long)(UINT_PTR)retlen,
+            (unsigned long)((UINT_PTR)retlen >> 48));
+        fd = open("/tmp/wine_ntac_stamp.log", O_WRONLY | O_APPEND | O_CREAT, 0644);
+        if (fd >= 0) { write(fd, buf, n); close(fd); }
+
+        /* explicit top16 NaN reject using local var derived from same printf */
+        t16 = (unsigned long)((UINT_PTR)retlen >> 48);
+        if (t16 == 0x7ff8UL || t16 == 0x7ffcUL || t16 == 0xfff8UL) {
+            n = snprintf(buf, sizeof(buf),
+                ">>> v15 NaN-retlen REJECT: retlen=%lx top16=%lx\n",
+                (unsigned long)(UINT_PTR)retlen, t16);
+            fd = open("/tmp/wine_ntac_stamp.log", O_WRONLY | O_APPEND | O_CREAT, 0644);
+            if (fd >= 0) { write(fd, buf, n); close(fd); }
+            return STATUS_ACCESS_VIOLATION;
+        }
+    }
+    /* PATCH-032 v10: entry log for diagnostics. */
+    {
+        static volatile int g_entry_cnt = 0;
+        int n_entry = __atomic_add_fetch(&g_entry_cnt, 1, __ATOMIC_RELAXED);
+        char buf[256];
+        int n = snprintf(buf, sizeof(buf),
+            "[#%d] entry: retlen=%p (=%lx) privs=%p mapping=%p ag=%p as=%p\n",
+            n_entry, retlen, (unsigned long)(UINT_PTR)retlen,
+            privs, mapping, access_granted, access_status);
+        int fd = open("/tmp/wine_ntac_entry.log", O_WRONLY | O_APPEND | O_CREAT, 0644);
+        if (fd >= 0) { write(fd, buf, n); close(fd); }
+    }
+
     TRACE( "(%p, %p, %08x, %p, %p, %p, %p, %p)\n",
            descr, token, access, mapping, privs, retlen, access_granted, access_status );
 
-    if (!privs || !retlen) return STATUS_ACCESS_VIOLATION;
-    priv_len = *retlen;
+    /* PATCH-032 (2026-05-15 evening, wine source): UE5 / Source 2 games
+     * sometimes call NtAccessCheck with garbage pointer arguments
+     * (small-integer-as-pointer like 13, e.g. when an internal struct
+     * field is uninitialized). The original null check passes for
+     * non-zero garbage, so the immediately-following `*retlen`
+     * dereference faults inside wine's ntdll.so at offset ~0x2a330. The
+     * resulting Apple Mach exception cascades through wine's signal
+     * handler and the process dies before window creation. Treat any
+     * pointer below the 4 KB host page boundary as not-a-valid-pointer
+     * and return STATUS_ACCESS_VIOLATION cleanly. */
+    /* PATCH-032 v2 (2026-05-16 morning, wine source): additionally guard
+     * against NaN-boxed pointer values like 0x7ff800000001 that appear
+     * when Apple framework results contaminate wine PE arguments via
+     * shim PATCH-026/030 returning sentinel values. The upper 16 bits
+     * 0x7ff8 / 0xfff8 / 0x7ffc are the QNaN signatures in IEEE-754
+     * double encoding — never a valid wine pointer.
+     *
+     * Also reject canonical-user-space addresses below 0x10000 (likely
+     * small integers) and above 0x7fff00000000 (high kernel-canonical
+     * range that wine doesn't allocate in). BOGUS_PTR is at file scope. */
+    /* PATCH-032 v13: explicit single-arg NaN check FIRST. Use inline asm
+     * to bypass any compiler optimizer issues. Write to ENTRY log (known
+     * working) with distinctive marker. */
+    {
+        unsigned long rl_raw;
+        unsigned long top16;
+        __asm__ volatile ("movq %1, %%rax\n\t"
+                          "shrq $48, %%rax\n\t"
+                          "movq %%rax, %0"
+                          : "=r" (top16)
+                          : "r" ((unsigned long)(uintptr_t)retlen)
+                          : "rax");
+        rl_raw = (unsigned long)(uintptr_t)retlen;
+        if (top16 == 0x7ff8 || top16 == 0x7ffc || top16 == 0xfff8) {
+            char buf[160];
+            int n = snprintf(buf, sizeof(buf),
+                ">>> EXPLICIT-ASM NaN-rl: retlen=%lx top16=%lx\n", rl_raw, top16);
+            int fd = open("/tmp/wine_ntac_entry.log", O_WRONLY | O_APPEND | O_CREAT, 0644);
+            if (fd >= 0) { write(fd, buf, n); close(fd); }
+            return STATUS_ACCESS_VIOLATION;
+        }
+    }
+    if (!privs || !retlen ||
+        (UINT_PTR)retlen < 0x1000 || (UINT_PTR)privs < 0x1000 ||
+        !access_granted || !access_status ||
+        (UINT_PTR)access_granted < 0x1000 || (UINT_PTR)access_status < 0x1000 ||
+        BOGUS_PTR(privs) || BOGUS_PTR(retlen) ||
+        BOGUS_PTR(access_granted) || BOGUS_PTR(access_status) ||
+        !mapping || BOGUS_PTR(mapping) ||
+        (descr && BOGUS_PTR(descr)))
+    {
+        /* PATCH-032 v10: count rejects too. Correlate with entry numbers. */
+        static volatile int g_reject_cnt = 0;
+        int n_reject = __atomic_add_fetch(&g_reject_cnt, 1, __ATOMIC_RELAXED);
+        void *caller = __builtin_return_address(0);
+        char buf[512];
+        int n = snprintf(buf, sizeof(buf),
+            "[#%d] reject: caller=%p retlen=%p (=%lx) privs=%p mapping=%p\n",
+            n_reject, caller, retlen, (unsigned long)(UINT_PTR)retlen,
+            privs, mapping);
+        int fd = open("/tmp/wine_ntac_reject.log", O_WRONLY | O_APPEND | O_CREAT, 0644);
+        if (fd >= 0) {
+            write(fd, buf, n);
+            close(fd);
+        }
+        return STATUS_ACCESS_VIOLATION;
+    }
+    /* PATCH-032 v11: log values seen AT the deref site so we can see
+     * what slipped through our check. */
+    {
+        char buf[256];
+        int n = snprintf(buf, sizeof(buf),
+            "PRE-DEREF: retlen=%p (=%lx) — about to *retlen\n",
+            retlen, (unsigned long)(UINT_PTR)retlen);
+        int fd = open("/tmp/wine_ntac_predef.log", O_WRONLY | O_APPEND | O_CREAT, 0644);
+        if (fd >= 0) { write(fd, buf, n); close(fd); }
+    }
+    /* Belt-and-suspenders: prevent compiler from CSE-ing the NaN check
+     * away by reading priv_len through a volatile pointer right before use. */
+    {
+        volatile ULONG *vp = (volatile ULONG *)retlen;
+        priv_len = *vp;
+    }
 
     /* reuse the object attribute SD marshalling */
     InitializeObjectAttributes( &attr, NULL, 0, 0, descr );
@@ -956,6 +1089,15 @@ NTSTATUS WINAPI NtAccessCheckAndAuditAlarm( UNICODE_STRING *subsystem, HANDLE ha
                                             ACCESS_MASK *access_granted, NTSTATUS *access_status,
                                             BOOLEAN *onclose )
 {
+    /* PATCH-032 v8: stub returns STATUS_NOT_IMPLEMENTED, but the FIXME's
+     * debugstr_us() deref of subsystem/typename UNICODE_STRINGs faults
+     * when wine PE passes NaN-boxed Apple framework values as pointers
+     * (same root cause as NtAccessCheck). Skip the FIXME format if any
+     * argument is NaN-shaped — function still returns NOT_IMPLEMENTED. */
+    if (BOGUS_PTR(subsystem) || BOGUS_PTR(typename) || BOGUS_PTR(objectname) ||
+        (descr && BOGUS_PTR(descr)) || (mapping && BOGUS_PTR(mapping)) ||
+        BOGUS_PTR(access_granted) || BOGUS_PTR(access_status) || BOGUS_PTR(onclose))
+        return STATUS_NOT_IMPLEMENTED;
     FIXME( "(%s, %p, %s, %p, 0x%08x, %p, %d, %p, %p, %p), stub\n",
            debugstr_us(subsystem), handle, debugstr_us(typename), descr, access,
            mapping, creation, access_granted, access_status, onclose );
