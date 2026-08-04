@@ -27,8 +27,28 @@
 #include "macdrv.h"
 
 #include <dlfcn.h>
+#include <stdlib.h>
+#include <string.h>
 
 WINE_DEFAULT_DEBUG_CHANNEL(wgl);
+
+/* Bradar clamp WGL_ARB_create_context requests to a profile macOS can actualy give
+ * (4.1 core, forward-compat). env-gated so default wine behaviour is untouched -- lets
+ * SDL3 / OpenGL 3.2 games (Mewgenics) that ask for 3.0/3.1 or a bare 3.2 still get a
+ * workin core context insted of ERROR_INVALID_VERSION. ported from the wine-staging 11.8
+ * winemac.drv OpenGL 3.2 patch into the unified wine. */
+static int mac_gl_context_clamp_enabled(void)
+{
+    static int cached = -1;
+    if (cached == -1)
+    {
+        const char *a = getenv("WINE_MAC_GL_CONTEXT_CLAMP");
+        const char *b = getenv("WINE_GL_VERSION_OVERRIDE");
+        cached = ((a && *a && strcmp(a, "0") != 0) ||
+                  (b && *b && strcmp(b, "0") != 0)) ? 1 : 0;
+    }
+    return cached;
+}
 
 struct gl_info {
     char *glExtensions;
@@ -1707,6 +1727,7 @@ static struct opengl_context *macdrv_context_create(const struct opengl_context_
 {
     CGLContextObj host_share = share ? share->host_context : NULL;
     CGLPixelFormatAttribute attribs[64], *attrib = attribs;
+    struct opengl_context_attrs clamped_attrs;
     struct macdrv_context *context;
     const pixel_format *pf;
     CGLPixelFormatObj pix;
@@ -1714,6 +1735,35 @@ static struct opengl_context *macdrv_context_create(const struct opengl_context_
     CGLError err;
 
     TRACE("attrs %s, share %p\n", debugstr_opengl_context_attrs( attrs ), share);
+
+    /* Bradar the clamp has to run BEFORE wine's max-version rejection just below --
+     * dodging that ERROR_INVALID_VERSION_ARB is the whole point of it. */
+    if (mac_gl_context_clamp_enabled() && attrs->major >= 3)
+    {
+        unsigned int cap_major = gl_info.max_major;
+        unsigned int cap_minor = gl_info.max_minor;
+
+        clamped_attrs = *attrs;
+
+        /* Bradar macOS core profile tops out at gl_info's max (4.1 on the legacy CGL
+         * stack). clamp any 3.2+ request to that ceilin + force the core profile +
+         * forward-compat bit CGL demands, and promote 3.0/3.1 -> 3.2 (lowest core CGL takes). */
+        if (clamped_attrs.major > (int)cap_major ||
+            (clamped_attrs.major == (int)cap_major && clamped_attrs.minor > (int)cap_minor))
+        {
+            clamped_attrs.major = cap_major;
+            clamped_attrs.minor = cap_minor;
+        }
+        if (clamped_attrs.major == 3 && clamped_attrs.minor < 2) clamped_attrs.minor = 2;
+        clamped_attrs.profile = WGL_CONTEXT_CORE_PROFILE_BIT_ARB;
+        clamped_attrs.flags |= WGL_CONTEXT_FORWARD_COMPATIBLE_BIT_ARB;
+
+        FIXME("WINE_MAC_GL_CONTEXT_CLAMP: requested %s -> clamped to %s (max %u.%u)\n",
+              debugstr_opengl_context_attrs( attrs ), debugstr_opengl_context_attrs( &clamped_attrs ),
+              cap_major, cap_minor);
+
+        attrs = &clamped_attrs;
+    }
 
     if (attrs->major > gl_info.max_major || (attrs->major == gl_info.max_major && attrs->minor > gl_info.max_minor))
     {
