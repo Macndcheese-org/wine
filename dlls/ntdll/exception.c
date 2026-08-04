@@ -200,7 +200,31 @@ static LONG call_vectored_handlers( EXCEPTION_RECORD *rec, CONTEXT *context )
     except_ptrs.ExceptionRecord = rec;
     except_ptrs.ContextRecord = context;
 
-    RtlEnterCriticalSection( &vectored_handlers_section );
+    /* PATCH-010: try-lock + skip-if-locked.
+     *
+     * On macOS 26.4.1 Rosetta x86_64, after PATCH-009 lets cs2 recover
+     * from NULL function-pointer calls, downstream C++ code occasionally
+     * trips libc++abi (`libc++abi: terminating`) — usually because the
+     * just-returned-NULL function was supposed to throw an exception.
+     * The `terminate()` call kills the wine PE thread without releasing
+     * any critical sections it holds. If it held `vectored_handlers_section`
+     * (which it does whenever the SEH chain is being walked), every
+     * subsequent exception in any other thread blocks forever in
+     * `RtlpWaitForCriticalSection`, logging "blocked by 0000".
+     *
+     * Mitigation: try to enter the section non-blockingly. If we can't
+     * (another thread has it AND the recursion test below shows we're
+     * not that thread either), just skip the vectored-handler chain
+     * entirely and let SEH handle the exception. We may miss a
+     * registered vectored handler, but the process keeps running. */
+    if (!RtlTryEnterCriticalSection( &vectored_handlers_section ))
+    {
+        ERR_(seh)( "vectored_handlers_section busy (owner=%04lx, count=%ld); skipping vectored chain "
+                   "to avoid deadlock (PATCH-010)\n",
+                   HandleToULong(vectored_handlers_section.OwningThread),
+                   vectored_handlers_section.LockCount );
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
 
     mark = &vectored_exception_handlers;
     entry = mark->Flink;
