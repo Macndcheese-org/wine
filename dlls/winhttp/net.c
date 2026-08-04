@@ -96,8 +96,13 @@ static DWORD netconn_verify_cert( PCCERT_CONTEXT cert, WCHAR *server, DWORD secu
     *ret_chain = NULL;
     chainPara.RequestedUsage.Usage.cUsageIdentifier = 1;
     chainPara.RequestedUsage.Usage.rgpszUsageIdentifier = server_auth;
+    /* Bradar: CACHE_ONLY revocation so the TLS verify never BLOCKS on a synchronous CRL/OCSP
+     * network fetch. steam.exe's startup update-check handshake stalled for ages on a COLD
+     * Lets-Encrypt CRL (r13.c.lencr.org) under wine winhttp -- curl was fine coz it doesnt do
+     * this blocking fetch. An un-cached CRL comes back offline/unknown, tolerated just below. */
     ret = CertGetCertificateChain( NULL, cert, NULL, store, &chainPara,
-                                   check_revocation ? CERT_CHAIN_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT : 0,
+                                   check_revocation ? (CERT_CHAIN_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT |
+                                                       CERT_CHAIN_REVOCATION_CHECK_CACHE_ONLY) : 0,
                                    NULL, &chain );
     if (ret)
     {
@@ -125,7 +130,11 @@ static DWORD netconn_verify_cert( PCCERT_CONTEXT cert, WCHAR *server, DWORD secu
                       CERT_TRUST_IS_OFFLINE_REVOCATION) ||
                      (chain->TrustStatus.dwErrorStatus &
                       CERT_TRUST_REVOCATION_STATUS_UNKNOWN))
-                err = ERROR_WINHTTP_SECURE_CERT_REV_FAILED;
+                /* Bradar: best-effort revocation. With CACHE_ONLY above, an un-cached CRL comes
+                 * back offline/unknown -- accept it (soft-fail) insted of a hard REV_FAILED, else
+                 * cache-only would just FAIL every cold cert. A genuinely revoked cert (found in a
+                 * cached CRL) still trips CERT_TRUST_IS_REVOKED below and is rejected. */
+                err = ERROR_SUCCESS;
             else if (chain->TrustStatus.dwErrorStatus & CERT_TRUST_IS_REVOKED)
                 err = ERROR_WINHTTP_SECURE_CERT_REVOKED;
             else if (chain->TrustStatus.dwErrorStatus &
