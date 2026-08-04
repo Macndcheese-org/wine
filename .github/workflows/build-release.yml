@@ -1,0 +1,167 @@
+name: Build and Release
+
+# Builds this repo's full Wine source tree on every push to main and publishes
+# the result as a GitHub Release asset (.tar.xz). Unlike the sibling
+# wine-MacNdCheese-Engine- repo (which clones upstream wine-staging and applies
+# patch files), this repo already IS the patched source tree, so CI just
+# checks it out and builds it directly.
+#
+# NOTE on the compiler: the known-good local build command for this repo uses
+# CC=/tmp/wcc CXX=/tmp/wcxx (compiler wrapper scripts that live only on the
+# dev machine, outside this repo — there is no record of their exact contents
+# to reproduce here). This workflow uses plain clang + --with-mingw instead,
+# matching the sibling repo's build-release.yml, which is proven to produce a
+# working wow64 (i386+x86_64) build of this same patch set on a GitHub-hosted
+# runner. If a build fails in a way plain clang can't explain, the missing
+# wcc/wcxx behavior is the first thing to check.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: build-release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15-intel
+    timeout-minutes: 180
+    env:
+      # ccache defaults to invalidating its cache when the compiler binary's
+      # mtime changes. Check content instead, matching upstream Wine's own
+      # CI (tools/gitlab/build.yml) -- avoids spurious cache misses.
+      CCACHE_COMPILERCHECK: content
+    outputs:
+      asset: ${{ steps.package.outputs.asset }}
+      tag: ${{ steps.package.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          brew install \
+            autoconf \
+            bison \
+            ccache \
+            flex \
+            freetype \
+            gettext \
+            gnutls \
+            gstreamer \
+            krb5 \
+            mingw-w64 \
+            molten-vk \
+            pkg-config \
+            sdl2
+
+      - name: Add bison, flex, gettext & krb5 to PATH
+        run: |
+          echo "$(brew --prefix bison)/bin"   >> "$GITHUB_PATH"
+          echo "$(brew --prefix flex)/bin"    >> "$GITHUB_PATH"
+          echo "$(brew --prefix gettext)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix krb5)/bin"    >> "$GITHUB_PATH"
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/ccache
+          key: ccache-${{ runner.os }}-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ github.ref_name }}-
+            ccache-${{ runner.os }}-
+
+      - name: Configure
+        run: |
+          rm -rf build64 && mkdir build64 && cd build64
+          CC="ccache clang" \
+          CXX="ccache clang++" \
+          OBJC="ccache clang" \
+          OBJCXX="ccache clang++" \
+          LDFLAGS="-Wl,-rpath,$(brew --prefix)/lib -L$(xcrun --show-sdk-path)/System/Library/Frameworks/OpenGL.framework/Versions/A/Libraries" \
+          PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig" \
+          MACOSX_DEPLOYMENT_TARGET=11.0 \
+          ../configure \
+            --build=x86_64-apple-darwin \
+            --enable-win64 \
+            --enable-archs=i386,x86_64 \
+            --with-coreaudio \
+            --with-freetype \
+            --with-gnutls \
+            --with-gstreamer \
+            --with-mingw="ccache clang" \
+            --with-sdl \
+            --with-vulkan \
+            --without-alsa \
+            --without-capi \
+            --without-dbus \
+            --without-oss \
+            --without-pulse \
+            --without-udev \
+            --without-v4l2 \
+            --without-x \
+            --disable-tests
+
+      - name: Build
+        run: make -C build64 -j"$(sysctl -n hw.ncpu)"
+
+      - name: Package
+        id: package
+        run: |
+          VERSION="$(grep -o '[0-9][0-9.]*' VERSION | head -1)"
+          SHORT_SHA="$(git rev-parse --short HEAD)"
+          ASSET="wine-macndcheese-${VERSION}-${SHORT_SHA}-osx64.tar.xz"
+          TAG="build-${{ github.run_number }}-${SHORT_SHA}"
+
+          make -C build64 install DESTDIR="$GITHUB_WORKSPACE/dist"
+          tar -cJf "$ASSET" -C "$GITHUB_WORKSPACE/dist" .
+
+          echo "asset=$ASSET"     >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG"         >> "$GITHUB_OUTPUT"
+
+      - name: Upload config.log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: config-log
+          path: build64/config.log
+          retention-days: 7
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.package.outputs.tag }}" \
+            "${{ steps.package.outputs.asset }}" \
+            --repo "${{ github.repository }}" \
+            --title "MacNdCheese Wine ${{ steps.package.outputs.version }} (${{ steps.package.outputs.tag }})" \
+            --notes "Automated build of $(git log -1 --format='%H') on main:
+
+          $(git log -1 --format='%s')"
+
+  on-failure:
+    needs: build
+    if: ${{ always() && needs.build.result == 'failure' }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open build-failure issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          TITLE="build: main failed to build (${{ github.sha }})"
+          gh issue create --repo "${{ github.repository }}" \
+            --title "$TITLE" \
+            --label "build-failure,automated" \
+            --body "Automated build for commit ${{ github.sha }} on main failed.
+
+          Failing run: ${RUN_URL}"
