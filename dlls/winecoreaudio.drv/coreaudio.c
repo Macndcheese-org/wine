@@ -842,6 +842,28 @@ static NTSTATUS unix_create_stream(void *args)
     params->result = ca_setup_audiounit(stream->flow, stream->unit, stream->fmt, &stream->dev_desc, &stream->converter);
     if(FAILED(params->result)) goto end;
 
+    /* Bradar MNC: for capture pin the CoreAudio HW buffer to our WASAPI period. Without
+     * this macOS picks a large default HW buffer and wine reconciles the mismatch
+     * by holding ~2 periods in capture_resample which is audible mic latency and
+     * drops frames under game CPU load. Best-effort and clamped to the device range.
+     * Gated to capture so game audio output is untouched. */
+    if(stream->flow == eCapture){
+        AudioObjectPropertyAddress a = { kAudioDevicePropertyBufferFrameSize,
+                                         kAudioObjectPropertyScopeGlobal, 0 };
+        UInt32 want = muldiv(stream->period, stream->dev_desc.mSampleRate, 10000000);
+        AudioValueRange range;
+        UInt32 rsz = sizeof(range);
+        a.mSelector = kAudioDevicePropertyBufferFrameSizeRange;
+        if(AudioObjectGetPropertyData(stream->dev_id, &a, 0, NULL, &rsz, &range) == noErr){
+            if(want < range.mMinimum) want = range.mMinimum;
+            if(want > range.mMaximum) want = range.mMaximum;
+        }
+        a.mSelector = kAudioDevicePropertyBufferFrameSize;
+        sc = AudioObjectSetPropertyData(stream->dev_id, &a, 0, NULL, sizeof(want), &want);
+        if(sc != noErr) WARN("mnc: couldn't pin capture HW buffer to %u frames: %x\n", (unsigned)want, (int)sc);
+        else TRACE("mnc: pinned capture HW buffer to %u frames (%.2f ms)\n", (unsigned)want, want * 1000.0 / stream->dev_desc.mSampleRate);
+    }
+
     input.inputProcRefCon = stream;
     if(stream->flow == eCapture){
         input.inputProc = ca_capture_cb;
@@ -884,6 +906,11 @@ static NTSTATUS unix_create_stream(void *args)
 
     if(stream->flow == eCapture){
         stream->cap_bufsize_frames = muldiv(params->duration, stream->dev_desc.mSampleRate, 10000000);
+        /* Bradar MNC: extra headroom so a transient app-drain stall under game load does not
+         * overflow the capture ring and drop frames which is the audible crackle. The
+         * resampler still drains at the 2-period threshold so steady-state latency is
+         * unchanged. Cheap RAM for fewer glitches under load. */
+        stream->cap_bufsize_frames *= 2;
         stream->cap_buffer = malloc(stream->cap_bufsize_frames * stream->fmt->nBlockAlign);
     }
     params->result = S_OK;
