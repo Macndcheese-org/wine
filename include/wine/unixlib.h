@@ -294,6 +294,7 @@ static inline NTSTATUS __wine_unix_call( unixlib_handle_t handle, unsigned int c
 #else
 static inline NTSTATUS __wine_unix_call( unixlib_handle_t handle, unsigned int code, void *args )
 {
+    if (!handle) return (NTSTATUS)0xc0000001; /* STATUS_UNSUCCESSFUL */
     return __wine_unix_call_dispatcher( handle, code, args );
 }
 #endif

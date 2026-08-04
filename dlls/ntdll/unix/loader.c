@@ -27,12 +27,15 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <stdbool.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <signal.h>
 #include <spawn.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stddef.h>
+#include <time.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
@@ -57,6 +60,9 @@
 #include <limits.h>
 #ifdef HAVE_SYS_SYSCTL_H
 # include <sys/sysctl.h>
+#endif
+#ifdef HAVE_SYS_UTSNAME_H
+# include <sys/utsname.h>
 #endif
 #ifdef __APPLE__
 # include <CoreFoundation/CoreFoundation.h>
@@ -295,13 +301,21 @@ static WORD get_alt_machine( WORD machine )
 
 static void set_dll_path(void)
 {
-    char *p, *path = getenv( "WINEDLLPATH" );
+    char *p, *path = getenv( "WINEDLLPATH" ), *prepend_path = getenv( "WINEDLLPATH_PREPEND" );
     int i, count = 0;
 
-    if (path) for (p = path, count = 1; *p; p++) if (*p == ':') count++;
+    if (prepend_path) for (p = prepend_path, count++; *p; p++) if (*p == ':') count++;
+    if (path) for (p = path, count++; *p; p++) if (*p == ':') count++;
 
     dll_paths = malloc( (count + 2) * sizeof(*dll_paths) );
     count = 0;
+
+    if (prepend_path)
+    {
+        prepend_path = strdup(prepend_path);
+        for (p = strtok( prepend_path, ":" ); p; p = strtok( NULL, ":" )) dll_paths[count++] = strdup( p );
+        free( prepend_path );
+    }
 
     if (!build_dir) dll_paths[count++] = dll_dir;
 
@@ -399,6 +413,21 @@ static void init_paths(void)
         bin_dir = build_relative_path( dll_dir, LIBDIR "/wine", BINDIR );
         data_dir = build_relative_path( dll_dir, LIBDIR "/wine", DATADIR "/wine" );
         wineloader = build_path( ntdll_dir, "wine" );
+    }
+
+    /* PATCH-013: honor the WINELOADER env var so wineserver-spawned child
+     * processes (wineboot.exe, services.exe, explorer.exe, the target .exe)
+     * are launched via our Cocoa launcher (Contents/MacOS/wine) instead of
+     * the standalone Resources/wine/bin/wine. Without this, only the FIRST
+     * wine process gets NSApp/AppKit and PATCH-006/012 protections — all
+     * subsequent wine processes hit the original NSApplication +initialize
+     * hang under macOS 26.4.1 Rosetta x86_64. */
+    {
+        const char *env_loader = getenv( "WINELOADER" );
+        if (env_loader && *env_loader)
+        {
+            wineloader = strdup( env_loader );
+        }
     }
 
     set_dll_path();
@@ -1012,14 +1041,55 @@ static void *non_native_support_lib;
 static void (*register_non_native_code_region)( void*, void* );
 static bool (*supports_non_native_code_regions)(void);
 
+/* MNC HACK 17 storage.  Globals rather than locals so the GPT_ABI_WRAPPER asm
+ * trampolines in unix_private.h can take their address via GOTPCREL. */
+void *libd3dshared_load_addr = NULL;
+void *libd3dshared_code_end  = NULL;
+
+static BOOL is_macos_13_or_later(void)
+{
+#ifdef HAVE_SYS_UTSNAME_H
+    struct utsname name;
+    unsigned int major, minor;
+
+    if (uname( &name ) || sscanf( name.release, "%u.%u", &major, &minor ) != 2) return FALSE;
+    return major >= 22;
+#else
+    return FALSE;
+#endif
+}
+
+static BOOL is_translated_process(void)
+{
+#ifdef HAVE_SYS_SYSCTL_H
+    int ret = 0;
+    size_t size = sizeof(ret);
+
+    if (sysctlbyname( "sysctl.proc_translated", &ret, &size, NULL, 0 ) == -1) return FALSE;
+    return ret == 1;
+#else
+    return FALSE;
+#endif
+}
+
 static void init_non_native_support(void)
 {
-    char *libd3dshared_path = getenv( "CX_APPLEGPTK_LIBD3DSHARED_PATH" );
+    /* MNC HACK 15a: GPTK 3.0 and newer spell the variable
+     * CX_APPLEGPTK_LIBD3DSHARED_PATH (K, not T), which is all the base looks
+     * for.  The backend still exports only the legacy spelling on two of its
+     * three launch paths, so without this fallback those launches register
+     * nothing and D3DMetal's caller detection never sees the PE ranges.  Try
+     * modern first, fall back to legacy. */
+    const char *libd3dshared_path = getenv( "CX_APPLEGPTK_LIBD3DSHARED_PATH" );
+
+    if (!libd3dshared_path) libd3dshared_path = getenv( "CX_APPLEGPT_LIBD3DSHARED_PATH" );
 
     register_non_native_code_region = NULL;
     supports_non_native_code_regions = NULL;
 
-    if (!libd3dshared_path)
+    /* MNC: registering code regions is meaningless outside a Rosetta-translated
+     * process on macOS 13+, and libd3dshared is not there to be dlopen'd. */
+    if (!libd3dshared_path || !is_macos_13_or_later() || !is_translated_process())
         return;
 
     non_native_support_lib = dlopen( libd3dshared_path, RTLD_LOCAL );
@@ -1027,21 +1097,56 @@ static void init_non_native_support(void)
     {
         register_non_native_code_region = dlsym( non_native_support_lib, "register_non_native_code_region" );
         supports_non_native_code_regions = dlsym( non_native_support_lib, "supports_non_native_code_regions" );
-        TRACE( "Loaded libd3dshared.dylib, does%s support non-native code regions\n",
+        TRACE( "Loaded libd3dshared.dylib, does%s support non-native code regions
+",
                 supports_non_native_code_regions ? (supports_non_native_code_regions() ? "" : " not") : " not" );
+
+        /* MNC HACK 17: record libd3dshared's __TEXT bounds so the
+         * GPT_ABI_WRAPPER trampolines (NtClose/NtSetEvent/...) can tell when
+         * their return address lies inside it and switch to the ms_abi
+         * msthunk variant.  Without this they take the sysv path for every
+         * caller. */
+        if (supports_non_native_code_regions)
+        {
+            Dl_info dli;
+            if (dladdr( (void *)supports_non_native_code_regions, &dli ) && dli.dli_fbase)
+            {
+                unsigned long sz = 0;
+                uint8_t *text_end = getsegmentdata( (const struct mach_header *)dli.dli_fbase,
+                                                    "__TEXT", &sz );
+                libd3dshared_load_addr = dli.dli_fbase;
+                libd3dshared_code_end  = text_end ? (void *)(text_end + sz)
+                                                  : (void *)((char *)dli.dli_fbase + 0x100000);
+                TRACE( "MNC HACK 17 libd3dshared range: %p-%p
+",
+                       libd3dshared_load_addr, libd3dshared_code_end );
+            }
+        }
     }
     else
-        TRACE( "Loading libd3dshared.dylib failed: %s\n", dlerror() );
+        TRACE( "Loading libd3dshared.dylib failed: %s
+", dlerror() );
 }
 
 static NTSTATUS pe_module_loaded( void *args )
 {
     struct pe_module_loaded_params *params = args;
+    /* MNC HACK 18 kill switch: WINE_D3DMETAL_MNC_HACK_18=0 disables the
+     * per-image registration without disturbing HACK 17. */
+    static int mnc_hack_18_enabled = -1;
+
+    if (mnc_hack_18_enabled == -1)
+    {
+        const char *v = getenv( "WINE_D3DMETAL_MNC_HACK_18" );
+        mnc_hack_18_enabled = (v && v[0] == '0' && v[1] == ' ') ? 0 : 1;
+    }
+    if (!mnc_hack_18_enabled) return STATUS_SUCCESS;
 
     pthread_once( &non_native_init_once, &init_non_native_support );
     if ((supports_non_native_code_regions && supports_non_native_code_regions()))
     {
-        TRACE( "Marking non_native_code_region: %p-%p\n", params->start, params->end );
+        TRACE( "Marking non_native_code_region: %p-%p
+", params->start, params->end );
         register_non_native_code_region( params->start, params->end );
     }
     return STATUS_SUCCESS;
@@ -1985,6 +2090,17 @@ static void start_main_thread(void)
 {
     struct thread_data *data = virtual_alloc_first_thread_data();
 
+#if defined(__APPLE__) && defined(__x86_64__)
+    /* MNC HACK 34: reroute libc localtime OFF pthread TSD slot 12 (gs:0x60) BEFORE we start
+     * poking the PEB into that slot -- do it first so nothing can stomp the mirror.
+     *
+     * The base installs the identical hook of its own, but only after load_apiset_dll(),
+     * which is far too late for the mirror written after init_startup_info() below: one
+     * libc localtime() call anywhere in between lands on slot 12 and overwrites the PEB.
+     * Hook it here and let the base's later call splice the same trampoline over itself --
+     * hook() writes absolute bytes, so running it twice is a no-op. */
+    hook( localtime, my_localtime );
+#endif
     server_init_process( data );
     hacks_init();
     msync_init();
@@ -1992,6 +2108,21 @@ static void start_main_thread(void)
     init_cpu_info();
     init_files();
     init_startup_info();
+#if defined(__APPLE__) && defined(__x86_64__)
+    /* MNC HACK 22 v3 + MNC HACK 34: mirror the TEB pointer fields into the live gs segment
+     * before the first wine syscall on the main thread -- slots 6 (Tib.Self), 11 (TLS) and
+     * 12 (Peb, for Arxan games that read gs:0x60 direct).
+     *
+     * Since wine 11.18 the first TEB is only allocated once the main image is mapped,
+     * inside init_startup_info(), so this runs right after it instead of first thing;
+     * nothing between the two enters PE code or the syscall dispatcher. */
+    {
+        TEB *teb = data->teb;
+        __asm__ volatile (".byte 0x65\n\tmovq %0,%c1" :: "r" (teb->Tib.Self),                  "n" (FIELD_OFFSET(TEB, Tib.Self)));
+        __asm__ volatile (".byte 0x65\n\tmovq %0,%c1" :: "r" (teb->ThreadLocalStoragePointer), "n" (FIELD_OFFSET(TEB, ThreadLocalStoragePointer)));
+        __asm__ volatile (".byte 0x65\n\tmovq %0,%c1" :: "r" (teb->Peb),                       "n" (FIELD_OFFSET(TEB, Peb)));
+    }
+#endif
     dbg_init();
     *(ULONG_PTR *)&peb->CloudFileFlags = get_image_address();
     set_load_order_app_name( main_wargv[0] );
@@ -2077,7 +2208,80 @@ static void apple_main_thread(void)
     CFRunLoopAddSource( CFRunLoopGetCurrent(), source, kCFRunLoopCommonModes );
     CFRunLoopSourceSignal( source );
     CFRelease( source );
-    CFRunLoopRun(); /* Should never return, except on error. */
+
+    /* PATCH-011 (PE-on-worker architecture):
+     *
+     * Replace `CFRunLoopRun()` with a real `[NSApp run]` event loop on the
+     * macOS main thread.
+     *
+     * Wine already runs PE code on a worker thread spawned by
+     * apple_create_wine_thread above. With the original CFRunLoopRun the
+     * macOS main thread services low-level CFRunLoop events but does NOT
+     * deliver NSEvents (mouse, keyboard, window-server messages). On
+     * macOS 26.4.x Rosetta this caused D3DMetal's `ThreadCallback` to
+     * wait forever for events that never arrive.
+     *
+     * We dlopen AppKit + libobjc, then:
+     *   1. NSApplicationLoad() — Apple-public C entry point that creates
+     *      the NSApp singleton (plain NSApplication, not WineApplication).
+     *   2. Read &NSApp via dlsym + deref to get the id.
+     *   3. objc_msgSend(NSApp, sel("run")) — Apple's event loop.
+     *
+     * The downstream macdrv_init code in winemac.drv detects NSApp != nil
+     * and adapts (PATCH-006 stub fallback if needed); since we now have a
+     * REAL NSApplication, OS events flow through NSApp.sendEvent: to
+     * NSWindow's responder chain → wine's WineWindow handlers → wine
+     * event queue → D3DMetal.
+     *
+     * Gated by WINE_MACDRV_REAL_NSAPP=1 (default OFF). Set to 1 to
+     * try the real NSApp path; if NSApplicationLoad hangs (the
+     * macOS 26.4.1 Rosetta wall), the wine PE thread will time out
+     * in macdrv_start_cocoa_app and fall back to PATCH-006's stub
+     * NSApp path instead.
+     */
+    {
+        const char *gate = getenv("WINE_MACDRV_REAL_NSAPP");
+        if (gate && gate[0] == '1')
+        {
+            void *appkit = dlopen( "/System/Library/Frameworks/AppKit.framework/AppKit",
+                                   RTLD_NOW | RTLD_GLOBAL );
+            void *libobjc = dlopen( "/usr/lib/libobjc.A.dylib", RTLD_NOW | RTLD_GLOBAL );
+            char (*load_fn)(void) = appkit ? dlsym( appkit, "NSApplicationLoad" ) : NULL;
+            void *(*sel_reg)( const char *) = libobjc ? dlsym( libobjc, "sel_registerName" ) : NULL;
+            void (*msg_send)( void *, void * ) = libobjc ? dlsym( libobjc, "objc_msgSend" ) : NULL;
+            void **p_NSApp = appkit ? dlsym( appkit, "NSApp" ) : NULL;
+
+            setvbuf( stderr, NULL, _IONBF, 0 );
+            fprintf( stderr, "patch011: appkit=%p libobjc=%p NSApplicationLoad=%p "
+                             "sel_registerName=%p objc_msgSend=%p &NSApp=%p\n",
+                     appkit, libobjc, (void *)load_fn, (void *)sel_reg, (void *)msg_send, p_NSApp );
+
+            if (load_fn && sel_reg && msg_send && p_NSApp)
+            {
+                fprintf( stderr, "patch011: calling NSApplicationLoad()...\n" );
+                char ok = load_fn();
+                fprintf( stderr, "patch011: NSApplicationLoad returned %d, NSApp=%p\n",
+                         (int)ok, *p_NSApp );
+                if (ok && *p_NSApp)
+                {
+                    void *run_sel = sel_reg( "run" );
+                    fprintf( stderr, "patch011: calling [NSApp run] — never returns\n" );
+                    msg_send( *p_NSApp, run_sel );
+                    fprintf( stderr, "patch011: [NSApp run] RETURNED (unexpected)\n" );
+                }
+                else
+                {
+                    fprintf( stderr, "patch011: NSApplicationLoad failed — falling back to CFRunLoopRun\n" );
+                }
+            }
+            else
+            {
+                fprintf( stderr, "patch011: dlsym failed — falling back to CFRunLoopRun\n" );
+            }
+        }
+    }
+
+    CFRunLoopRun(); /* Should never return, except on error. Fallback if PATCH-011 disabled or failed. */
 }
 #endif  /* __APPLE__ */
 
