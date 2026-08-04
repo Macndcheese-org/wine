@@ -1394,7 +1394,7 @@ NTSTATUS WINAPI NtCreateThread( HANDLE *handle, ACCESS_MASK access, OBJECT_ATTRI
 /***********************************************************************
  *              NtCreateThreadEx   (NTDLL.@)
  */
-NTSTATUS WINAPI NtCreateThreadEx( HANDLE *handle, ACCESS_MASK access, OBJECT_ATTRIBUTES *attr,
+NTSTATUS WINAPI GPT_IMPORT(NtCreateThreadEx)( HANDLE *handle, ACCESS_MASK access, OBJECT_ATTRIBUTES *attr,
                                   HANDLE process, PRTL_THREAD_START_ROUTINE start, void *param,
                                   ULONG flags, ULONG_PTR zero_bits, SIZE_T stack_commit,
                                   SIZE_T stack_reserve, PS_ATTRIBUTE_LIST *attr_list )
@@ -1474,6 +1474,22 @@ done:
     if (attr_list) status = update_attr_list( attr_list, *handle, &teb->ClientId, teb );
     return status;
 }
+
+/* MNC HACK 17: ms_abi shim for callers inside libd3dshared.dylib. */
+#if defined(__APPLE__) && defined(__x86_64__)
+NTSTATUS __attribute__((ms_abi)) msthunk_NtCreateThreadEx( HANDLE *handle, ACCESS_MASK access,
+                                                           OBJECT_ATTRIBUTES *attr,
+                                                           HANDLE process,
+                                                           PRTL_THREAD_START_ROUTINE start, void *param,
+                                                           ULONG flags, ULONG_PTR zero_bits,
+                                                           SIZE_T stack_commit, SIZE_T stack_reserve,
+                                                           PS_ATTRIBUTE_LIST *attr_list )
+{
+    return sysv_NtCreateThreadEx( handle, access, attr, process, start, param,
+                                  flags, zero_bits, stack_commit, stack_reserve, attr_list );
+}
+GPT_ABI_WRAPPER( NtCreateThreadEx );
+#endif
 
 
 /***********************************************************************
@@ -1562,6 +1578,41 @@ void exit_process( int status )
  */
 void wait_suspend( CONTEXT *context )
 {
+#if defined(__APPLE__) && defined(__x86_64__)
+    /* PATCH-014 (MACNDCHEESE Phase 3 wall fix):
+     *
+     * On macOS x86_64, wine sets gs.base = wine TEB so that PE-side
+     * NtCurrentTeb (inline `mov %gs:0x30, %rax`) returns the TEB self
+     * pointer. Apple's libc `__error()` (used to access `errno`) reads
+     * pthread TLS via a different `gs:OFFSET`. With gs.base = wine TEB
+     * instead of pthread_teb, that read returns whatever happens to be
+     * at TEB+OFFSET; in wineboot bring-up under our new in-process
+     * launcher that value is 0x320000 (a bogus address that immediately
+     * page-faults when dereferenced to load errno).
+     *
+     * That primary fault used to cascade into a triple-fault via
+     * handle_syscall_fault → __wine_syscall_dispatcher_return loading
+     * frame->rsp=0 → setup_raise_exception's memmove writing to
+     * 0xfffffffffffffd30. PATCH-014 also adds defensive guards in
+     * setup_raise_exception (virtual_setup_exception in virtual.c) and
+     * pre-seeds frame->rsp in init_syscall_frame, so cascades are now
+     * reported as a recognisable abort_thread instead of a crash.
+     * But the cleanest fix here is to just skip the errno save/restore
+     * on macOS — wait_suspend's callers do not rely on errno being
+     * preserved across the wait (the only callers are usr1_handler,
+     * which already runs in a signal-handler context where errno
+     * preservation is the caller's responsibility, and
+     * init_syscall_frame, which is part of thread bring-up and has no
+     * meaningful errno to preserve). Avoiding the libc errno access
+     * means no __error() call, no faulty TLS read, no fault.
+     */
+    struct context_data server_contexts[2];
+
+    contexts_to_server( server_contexts, context );
+    /* wait with 0 timeout, will only return once the thread is no longer suspended */
+    server_select( NULL, 0, SELECT_INTERRUPTIBLE, 0, server_contexts, NULL );
+    contexts_from_server( context, server_contexts );
+#else
     int saved_errno = errno;
     struct context_data server_contexts[2];
 
@@ -1570,6 +1621,7 @@ void wait_suspend( CONTEXT *context )
     server_select( NULL, 0, SELECT_INTERRUPTIBLE, 0, server_contexts, NULL );
     contexts_from_server( context, server_contexts );
     errno = saved_errno;
+#endif
 }
 
 
@@ -1697,9 +1749,49 @@ NTSTATUS WINAPI NtRaiseException( EXCEPTION_RECORD *rec, CONTEXT *context, BOOL 
 
 /**********************************************************************
  *           NtCurrentTeb   (NTDLL.@)
+ *
+ * SURGERY-003 (2026-05-16): on macOS, pthread_getspecific(teb_key) fails
+ * for wine PE threads because gs.base is set to wine TEB (not Apple TSD),
+ * so the shim's PATCH-046 silently no-ops the pthread_setspecific write at
+ * start_thread time. Subsequent pthread_getspecific returns garbage, causing
+ * wine's segv_handler / save_context to deadlock the main thread on a
+ * downstream fault.
+ *
+ * Fix: read TEB.Self directly from gs:[0x30] (the Win64 standard offset)
+ * which always returns the correct wine TEB for wine PE threads since
+ * wine's init_syscall_frame sets gs.base = wine_TEB.
  */
 TEB * WINAPI NtCurrentTeb(void)
 {
+#if defined(__x86_64__) && defined(__APPLE__)
+    /* SURGERY-003 v2: try gs:[0x30] first (TEB.Self per Win64 convention)
+     * which works when gs.base is the wine TEB (HACK 22). If gs:[0x30]
+     * doesn't look like a valid wine TEB, fall back to wine's own lookup.
+     *
+     * MNC FIX (2026-07-22): validate with the actual self-consistency check
+     * rather than an address-range guess. The old test was
+     * "(uintptr_t)teb >> 28 == 0x7", which both missed valid TEBs outside
+     * 0x7ffx_xxxx (this build's native TEBs commonly live near 0x1004xxxxx)
+     * and, worse, MISVALIDATED the 32-bit WOW TEB, which legitimately lives
+     * in that range. Whenever gs.base transiently pointed at the WOW TEB
+     * instead of the native one (observed right after the WOW64 CPU-mode
+     * transition through wow64cpu.dll), this returned the WOW TEB to a
+     * caller expecting the native 64-bit TEB. Every native-TEB field the
+     * caller then read was a 32-bit-TEB-shaped field at the wrong offset --
+     * garbage -- and RtlUnwindEx's "call builtin handlers registered in the
+     * tib list" fallback walked that garbage as an
+     * EXCEPTION_REGISTRATION_RECORD chain and jumped to a non-executable
+     * address, killing native exception dispatch on that thread for good.
+     * Root cause of the WOW64 exception-dispatch fault-storm in
+     * mont127/MacNdCheese-WineEngine-PRIVATE#4.
+     *
+     * A real TEB's Tib.Self always equals its own address wherever it
+     * lives; a WOW TEB read through the native layout essentially never
+     * satisfies that, because TEB32's Self sits at a different offset. */
+    TEB *teb;
+    __asm__ __volatile__("movq %%gs:0x30, %0" : "=r"(teb));
+    if (teb && (void *)teb->Tib.Self == (void *)teb) return teb;
+#endif
     struct thread_data *data = get_thread_data();
     return data ? data->teb : NULL;
 }
@@ -2124,7 +2216,11 @@ static void set_native_thread_name( HANDLE handle, const UNICODE_STRING *name )
 
     len = ntdll_wcstoumbs( name->Buffer, name->Length / sizeof(WCHAR), nameA, sizeof(nameA) - 1, FALSE );
     nameA[len] = '\0';
-    pthread_setname_np( nameA );
+    /* pthread_setname_np reads %gs:0x0 (TSD base) at libsystem_pthread+0x319f.
+     * On wine PE threads under Rosetta, %gs:0 is the Win32 TEB or NULL, so the
+     * subsequent xorq (%rbx),%rax NULL-derefs and the process access-violates.
+     * Thread naming is cosmetic; skip the call rather than crash. */
+    (void)nameA;
 #elif defined(__FreeBSD__)
     unsigned int status;
     char nameA[64];

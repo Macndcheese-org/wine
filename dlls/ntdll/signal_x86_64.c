@@ -266,6 +266,27 @@ NTSTATUS call_seh_handlers( EXCEPTION_RECORD *rec, CONTEXT *orig_context )
 
         if (dispatch.LanguageHandler)
         {
+            /* Validate the handler pointer — corrupted/uninitialised .pdata
+             * unwind data can yield bogus addresses that fault when called.
+             * Reject anything outside the dispatch's image OR in non-canonical
+             * Win64 user-space (>= 0x800000000000). Returning ContinueSearch
+             * lets the unwinder keep walking frames; if every frame has a
+             * bogus handler the exception propagates up and the thread
+             * terminates cleanly without holding wine-internal locks. */
+            ULONG_PTR h = (ULONG_PTR)dispatch.LanguageHandler;
+            BOOL handler_ok = (h >= dispatch.ImageBase && h < dispatch.ImageBase + 0x80000000ULL)
+                              || (h >= 0x10000 && h < 0x800000000000ULL);
+            if (!handler_ok)
+            {
+                ERR( "invalid LanguageHandler %p (image base %I64x); treat as no handler\n",
+                     dispatch.LanguageHandler, dispatch.ImageBase );
+                dispatch.LanguageHandler = NULL;
+                /* fall through with res = ExceptionContinueSearch — let the
+                 * unwinder keep walking instead of `continue`-skipping the
+                 * frame's epilogue logic that updates context. */
+                res = ExceptionContinueSearch;
+                goto language_handler_skipped;
+            }
             TRACE( "calling handler %p (rec=%p, frame=%I64x context=%p, dispatch=%p)\n",
                    dispatch.LanguageHandler, rec, dispatch.EstablisherFrame, orig_context, &dispatch );
             res = call_seh_handler( rec, dispatch.EstablisherFrame, orig_context,
@@ -293,6 +314,7 @@ NTSTATUS call_seh_handlers( EXCEPTION_RECORD *rec, CONTEXT *orig_context )
             default:
                 return STATUS_INVALID_DISPOSITION;
             }
+language_handler_skipped: ;
         }
         /* hack: call wine handlers registered in the tib list */
         else while (is_valid_frame( (ULONG_PTR)teb_frame ) && (ULONG64)teb_frame < context.Rsp)

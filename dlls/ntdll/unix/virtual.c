@@ -30,6 +30,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <stdlib.h>
 #include <signal.h>
 #include <sys/types.h>
@@ -878,6 +879,115 @@ static NTSTATUS load_builtin_unixlib( void *module, BOOL wow, const void **funcs
     server_leave_uninterrupted_section( &virtual_mutex, &sigset );
     if (!status && entry) status = entry();
     return status;
+}
+
+/* MNC HACK 30: a DXMT stub (d3d11_dxmt.dll etc., installed for the
+ * steam->DXMT routing in the PE loader) keeps "d3d11.dll" as its EXPORT
+ * name, so the export-name check below would bind it to libd3dshared's
+ * funcs table — poisoning DXMT with the D3DMetal dispatch.  DXMT stubs
+ * are recognizable by their winemetal.dll import (Apple's GPTK stubs
+ * never import winemetal); skip the fallback for them so they resolve
+ * through the regular winemetal.so unixlib path. */
+static BOOL pe_imports_winemetal( void *module, const IMAGE_NT_HEADERS *nt )
+{
+#if defined(__APPLE__) && defined(__x86_64__)
+    const IMAGE_DATA_DIRECTORY *dir;
+    const IMAGE_IMPORT_DESCRIPTOR *imp;
+
+    if (nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC)
+        dir = &((const IMAGE_NT_HEADERS64 *)nt)->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    else if (nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC)
+        dir = &((const IMAGE_NT_HEADERS32 *)nt)->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    else
+        return FALSE;
+
+    if (!dir->VirtualAddress || dir->Size < sizeof(*imp)) return FALSE;
+    imp = (const IMAGE_IMPORT_DESCRIPTOR *)((char *)module + dir->VirtualAddress);
+    for (; imp->Name; imp++)
+        if (!strcasecmp( (const char *)module + imp->Name, "winemetal.dll" )) return TRUE;
+#endif
+    return FALSE;
+}
+
+static BOOL is_d3dmetal_pe_stub( void *module, const char **name_ret )
+{
+#if defined(__APPLE__) && defined(__x86_64__)
+    const IMAGE_DATA_DIRECTORY *dir;
+    const IMAGE_EXPORT_DIRECTORY *exports;
+    IMAGE_NT_HEADERS *nt;
+    const char *name;
+
+    if (name_ret) *name_ret = NULL;
+    if (!module) return FALSE;
+
+    if (((IMAGE_DOS_HEADER *)module)->e_magic != IMAGE_DOS_SIGNATURE) return FALSE;
+    nt = (IMAGE_NT_HEADERS *)((char *)module + ((IMAGE_DOS_HEADER *)module)->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return FALSE;
+
+    if (nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC)
+        dir = &((IMAGE_NT_HEADERS64 *)nt)->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+    else if (nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC)
+        dir = &((IMAGE_NT_HEADERS32 *)nt)->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+    else
+        return FALSE;
+
+    if (!dir->VirtualAddress || dir->Size < sizeof(*exports)) return FALSE;
+    exports = (const IMAGE_EXPORT_DIRECTORY *)((char *)module + dir->VirtualAddress);
+    if (!exports->Name) return FALSE;
+
+    name = (const char *)module + exports->Name;
+    if (name_ret) *name_ret = name;
+
+    if (pe_imports_winemetal( module, nt )) return FALSE;  /* MNC HACK 30: DXMT stub, not GPTK */
+
+    return !strcasecmp( name, "dxgi.dll" ) ||
+           !strcasecmp( name, "d3d10.dll" ) ||
+           !strcasecmp( name, "d3d10core.dll" ) ||
+           !strcasecmp( name, "d3d11.dll" ) ||
+           !strcasecmp( name, "d3d12.dll" ) ||
+           !strcasecmp( name, "nvapi64.dll" ) ||
+           !strcasecmp( name, "nvngx-on-metalfx.dll" );
+#else
+    return FALSE;
+#endif
+}
+
+static NTSTATUS get_d3dmetal_unix_funcs_fallback( void *module, BOOL wow, const void **funcs )
+{
+#if defined(__APPLE__) && defined(__x86_64__)
+    static void *libd3dshared;
+    const char *module_name, *path;
+
+    if (wow) return STATUS_DLL_NOT_FOUND;
+    if (!is_d3dmetal_pe_stub( module, &module_name )) return STATUS_DLL_NOT_FOUND;
+
+    path = getenv( "CX_APPLEGPT_LIBD3DSHARED_PATH" );
+    if (!path || !*path) return STATUS_DLL_NOT_FOUND;
+
+    if (!libd3dshared)
+    {
+        libd3dshared = dlopen( path, RTLD_NOW | RTLD_LOCAL );
+        if (!libd3dshared)
+        {
+            fprintf( stderr, "[D3DMETAL_FB] dlopen failed: %s\n", dlerror() );
+            return STATUS_DLL_NOT_FOUND;
+        }
+        fprintf( stderr, "[D3DMETAL_FB] dlopen ok: handle=%p\n", libd3dshared );
+    }
+
+    *funcs = dlsym( libd3dshared, "__wine_unix_call_funcs" );
+    if (!*funcs)
+    {
+        fprintf( stderr, "[D3DMETAL_FB] missing __wine_unix_call_funcs\n" );
+        return STATUS_ENTRYPOINT_NOT_FOUND;
+    }
+
+    fprintf( stderr, "[D3DMETAL_FB] resolved module=%s funcs=%p\n",
+             module_name ? module_name : "(null)", *funcs );
+    return STATUS_SUCCESS;
+#else
+    return STATUS_DLL_NOT_FOUND;
+#endif
 }
 
 
@@ -2311,6 +2421,44 @@ static NTSTATUS map_view( struct file_view **view_ret, void *base, size_t size,
             TRACE( "got mem in reserved area %p-%p\n", ptr, (char *)ptr + size );
             goto done;
         }
+
+        /* MNC HACK 12: cs2 / Source 2 asks for 2 GB / 1 GB / 512 MB contiguous
+         * blocks at startup without MEM_TOP_DOWN. The bottom-up search hits the
+         * fragmented WINE_RESERVE region first and can't fit 2 GB even though
+         * WINE_TOP_DOWN has 16 GB free. Without a top-down retry cs2 cascades
+         * through OOMs (2GB -> 1MB), then NULL-derefs an allocation and the
+         * thread dies with c0000005 and a bogus stack=0. Retry large requests
+         * top-down so they land in the big top-down reservation: first in the
+         * reserved areas, then in the free area outside them.
+         *
+         * 11.16 carried this on staging's ntdll-ForceBottomUpAlloc allocator
+         * (alloc_free_area); staging 11.18 disables that patchset, so this is
+         * back on the stock map_reserved_area()/map_free_area() pair.
+         * Gated by env to allow A/B testing. */
+#if defined(__APPLE__)
+        if (!top_down && host_size >= 0x10000000)
+        {
+            static int g_fb_enabled = -1;
+
+            if (g_fb_enabled == -1)
+            {
+                const char *e = getenv( "WINE_D3DMETAL_NO_LARGE_ALLOC_TOPDOWN" );
+                g_fb_enabled = (e && *e == '1') ? 0 : 1;
+            }
+            if (g_fb_enabled)
+            {
+                TRACE( "MNC HACK 12 TRY: size=%#lx start=%p end=%p\n",
+                       (unsigned long)host_size, start, end );
+                if ((ptr = map_reserved_area( start, end, host_size, TRUE, unix_prot, align_mask )) ||
+                    (ptr = map_free_area( start, end, host_size, TRUE, unix_prot, align_mask )))
+                {
+                    TRACE( "MNC HACK 12 OK: got mem top-down %p-%p\n", ptr, (char *)ptr + size );
+                    goto done;
+                }
+                WARN( "MNC HACK 12 FAIL: top-down retry failed\n" );
+            }
+        }
+#endif
 
         if (start > address_space_start || end < host_addr_space_limit || top_down)
         {
@@ -4547,6 +4695,45 @@ NTSTATUS virtual_clear_tls_index( ULONG index )
 }
 
 
+/* MNC: exempt Steam-family exes from MNC_MIN_THREAD_STACK_MB. The env
+ * pre-commits the whole stack on macOS and a global 16MB floor crashed
+ * steam.exe at startup. Games like re4demo.exe are not in this list so they
+ * still get the bigger stacks. Unknown image is treated as Steam (bump
+ * skipped) to stay safe. Result is cached once the image name is known. */
+static int mnc_is_steam_image(void)
+{
+    static int cached = -1;
+    static const char *const steam_exes[] = {
+        "steam.exe", "steamwebhelper.exe", "steamservice.exe",
+        "steamerrorreporter.exe", "steamerrorreporter64.exe",
+        "gameoverlayui.exe", "streaming_client.exe", "steamsysinfo.exe",
+        "vulkandriverquery.exe", "vulkandriverquery64.exe",
+    };
+    RTL_USER_PROCESS_PARAMETERS *params;
+    const WCHAR *exe, *p;
+    unsigned int i;
+
+    if (cached != -1) return cached;
+    params = NtCurrentTeb()->Peb->ProcessParameters;
+    if (!params || !params->ImagePathName.Buffer) return 1; /* unknown -> skip bump */
+    exe = params->ImagePathName.Buffer;
+    for (p = exe; *p; p++) if (*p == '\\' || *p == '/') exe = p + 1;
+    for (i = 0; i < ARRAY_SIZE(steam_exes); i++)
+    {
+        const WCHAR *a = exe;
+        const char  *b = steam_exes[i];
+        while (*a && *b)
+        {
+            WCHAR ca = (*a >= 'A' && *a <= 'Z') ? *a + 32 : *a;
+            char  cb = (*b >= 'A' && *b <= 'Z') ? *b + 32 : *b;
+            if (ca != (WCHAR)(unsigned char)cb) break;
+            a++; b++;
+        }
+        if (!*a && !*b) return (cached = 1);
+    }
+    return (cached = 0);
+}
+
 /***********************************************************************
  *           virtual_alloc_thread_stack
  */
@@ -4563,6 +4750,15 @@ NTSTATUS virtual_alloc_thread_stack( INITIAL_TEB *stack, ULONG_PTR limit_low, UL
 
     size = max( reserve_size, commit_size );
     if (size < 1024 * 1024) size = 1024 * 1024;  /* Xlib needs a large stack */
+    /* optional bigger min thread stack via env for runtimes that recurse deep */
+    {
+        const char *mnc_min = getenv( "MNC_MIN_THREAD_STACK_MB" );
+        if (mnc_min && !mnc_is_steam_image())
+        {
+            SIZE_T mb = (SIZE_T)atoi( mnc_min );
+            if (mb && size < mb * 1024 * 1024) size = mb * 1024 * 1024;
+        }
+    }
     size = ROUND_SIZE( 0, size, granularity_mask );
 
     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
@@ -4576,6 +4772,19 @@ NTSTATUS virtual_alloc_thread_stack( INITIAL_TEB *stack, ULONG_PTR limit_low, UL
 #endif
 
     /* setup no access guard page */
+#ifdef __APPLE__
+    /* MACNDCHEESE Rosetta-26: macOS 26.4.x's Rosetta refuses to EmulateForward
+     * a synchronous SIGSEGV that occurs inside a function prologue (push
+     * rdi/rsi/rbx) when the destination page would normally be lazy-grown.
+     * Wine's normal flow is: PE code's prologue writes below the current
+     * stack high-water mark, the host hits the bottom-2-page guard, wine's
+     * signal handler grows the stack, instruction retries. On 26.4.x Rosetta
+     * aborts the synchronous exception delivery before wine sees it.
+     * Workaround: pre-commit the entire stack reservation (no guard pages).
+     * All pages were already set to VPROT_READ|VPROT_WRITE|VPROT_COMMITTED
+     * by map_view above, so no action is required here. */
+    (void)guard_page;
+#else
     if (guard_page)
     {
         set_page_vprot( view->base, host_page_size, 0 );
@@ -4583,6 +4792,7 @@ NTSTATUS virtual_alloc_thread_stack( INITIAL_TEB *stack, ULONG_PTR limit_low, UL
                         VPROT_READ | VPROT_WRITE | VPROT_COMMITTED | VPROT_GUARD );
         mprotect_range( view->base, 2 * host_page_size , 0, 0 );
     }
+#endif
     VIRTUAL_DEBUG_DUMP_VIEW( view );
 
     /* note: limit is lower than base since the stack grows down */
@@ -4590,7 +4800,13 @@ NTSTATUS virtual_alloc_thread_stack( INITIAL_TEB *stack, ULONG_PTR limit_low, UL
     stack->OldStackLimit = 0;
     stack->DeallocationStack = view->base;
     stack->StackBase = (char *)view->base + view->size;
+#ifdef __APPLE__
+    /* MACNDCHEESE: all pages were left committed (no bottom-2 guard above),
+     * so the entire reservation is usable as stack. */
+    stack->StackLimit = (char *)view->base;
+#else
     stack->StackLimit = (char *)view->base + (guard_page ? 2 * host_page_size : 0);
+#endif
 done:
     server_leave_uninterrupted_section( &virtual_mutex, &sigset );
     return status;
@@ -4838,10 +5054,46 @@ done:
 void *virtual_setup_exception( struct thread_data *data, void *stack_ptr, size_t size, EXCEPTION_RECORD *rec )
 {
     char *stack = stack_ptr;
+    TEB *teb = NtCurrentTeb();
     struct thread_stack_info stack_info;
+
+    /* PATCH-014 (MACNDCHEESE Phase 3 wall, defensive belt):
+     *
+     * Guard against catastrophically bogus stack pointers. If `stack_ptr`
+     * is NULL or near-NULL (e.g. faulting code had rsp=0), or sits in the
+     * "kernel half" of the 64-bit address space (anything ≥ 2^47 on
+     * x86_64 user space), the subtraction below produces a non-canonical
+     * pointer that the caller will then memmove into — and we triple-
+     * fault writing to e.g. 0xfffffffffffffd30.
+     *
+     * Diagnosed concretely in CS2 wineboot bring-up (PATCH-014 log):
+     * wait_suspend faulted reading errno (Apple __error() returned a
+     * bogus addr because gs.base was wine TEB instead of pthread_teb).
+     * handle_syscall_fault rerouted through
+     * __wine_syscall_dispatcher_return which loaded frame->rsp=0 into
+     * %rsp, then the next setup_raise_exception saw RSP_sig=0 and called
+     * us with stack_ptr=0; we returned (void*)(0 - 0x7c0) and the caller
+     * memmove'd into it.
+     *
+     * Bail out loudly instead. The thread is already toast at this
+     * point — a recognisable abort_thread is strictly better than a
+     * cascading crash. */
+    {
+        ULONG_PTR sp = (ULONG_PTR)stack;
+        if (sp < 0x10000 || sp >= 0x800000000000ULL)
+        {
+            /* bogus or overflowed rsp so log the stack bounds and abort */
+            ERR( "setup_raise_exception called with bogus stack=%p size=%lx rec_code=%x rec_addr=%p teb=%p stackbase=%p dealloc=%p — corrupted thread state, aborting thread\n",
+                 stack, (unsigned long)size, rec ? rec->ExceptionCode : 0,
+                 rec ? rec->ExceptionAddress : NULL, teb,
+                 teb ? teb->Tib.StackBase : NULL, teb ? teb->DeallocationStack : NULL );
+            abort_thread(1);
+        }
+    }
 
     if (!is_inside_thread_stack( data, stack, &stack_info ))
     {
+        if (!teb) return stack - size;
         if (is_inside_signal_stack( data, stack ))
         {
             ERR( "nested exception on signal stack addr %p stack %p\n", rec->ExceptionAddress, stack );
@@ -4857,11 +5109,27 @@ void *virtual_setup_exception( struct thread_data *data, void *stack_ptr, size_t
 
     if (stack < stack_info.start + host_page_size)
     {
-        /* stack overflow on last page, unrecoverable */
+        /* MACNDCHEESE: near-exhaustion on last page. Upstream aborts the
+         * thread here which silently kills games (seen with GPTK D3DMetal
+         * + CS2 / Unity titles that unwind through host libraries). Try to
+         * grow into the guard page first; if that works, dispatch the
+         * exception as STATUS_STACK_OVERFLOW so the app's handler can run.
+         * If growing is impossible, still flag STATUS_STACK_OVERFLOW and
+         * return a best-effort pointer rather than silently aborting. */
         UINT diff = stack_info.start + host_page_size - stack;
-        ERR( "stack overflow %u bytes addr %p stack %p (%p-%p-%p)\n",
-             diff, rec->ExceptionAddress, stack, stack_info.start, stack_info.limit, stack_info.end );
-        abort_thread(1);
+        WARN( "stack overflow %u bytes addr %p stack %p (%p-%p-%p); attempting recovery\n",
+              diff, rec->ExceptionAddress, stack, stack_info.start, stack_info.limit, stack_info.end );
+        {
+            char *page = ROUND_ADDR( stack, host_page_mask );
+            mutex_lock( &virtual_mutex );
+            if ((get_host_page_vprot( page ) & VPROT_GUARD))
+                grow_thread_stack( data, page, &stack_info );
+            mutex_unlock( &virtual_mutex );
+        }
+        rec->ExceptionCode = STATUS_STACK_OVERFLOW;
+        rec->NumberParameters = 0;
+        if (stack < stack_info.start + host_page_size)
+            stack = stack_info.start + host_page_size;
     }
     else if (stack < stack_info.limit)
     {
@@ -4874,6 +5142,28 @@ void *virtual_setup_exception( struct thread_data *data, void *stack_ptr, size_t
         }
         mutex_unlock( &virtual_mutex );
     }
+#ifdef __APPLE__
+    /* MACNDCHEESE Rosetta-26: macOS 26.4.x Rosetta refuses to EmulateForward
+     * a synchronous SIGSEGV that occurs inside KiUserExceptionDispatcher's
+     * own prologue or its early locals when those writes hit a guard page
+     * just below the exception frame. The fault would normally be a benign
+     * stack-grow, but Rosetta cannot recover synchronously and aborts the
+     * process. Pre-commit two extra pages below the exception frame so the
+     * dispatcher's prologue + first-call locals are guaranteed mapped. */
+    {
+        char *page = ROUND_ADDR( stack, host_page_mask );
+        int extra;
+        for (extra = 1; extra <= 2; extra++)
+        {
+            char *below = page - extra * host_page_size;
+            if (below <= stack_info.start) break;
+            mutex_lock( &virtual_mutex );
+            if ((get_host_page_vprot( below ) & VPROT_GUARD))
+                grow_thread_stack( data, below, &stack_info );
+            mutex_unlock( &virtual_mutex );
+        }
+    }
+#endif
 #if defined(VALGRIND_MAKE_MEM_UNDEFINED)
     VALGRIND_MAKE_MEM_UNDEFINED( stack, size );
 #elif defined(VALGRIND_MAKE_WRITABLE)
@@ -6391,6 +6681,9 @@ NTSTATUS WINAPI NtQueryVirtualMemory( HANDLE process, LPCVOID addr,
                 const void *funcs = NULL;
 
                 status = load_builtin_unixlib( module, info_class == MemoryWineLoadUnixLibWow64, &funcs );
+                if (status)
+                    status = get_d3dmetal_unix_funcs_fallback( module, info_class == MemoryWineLoadUnixLibWow64,
+                                                               &funcs );
                 if (!status) *(unixlib_handle_t *)buffer = (UINT_PTR)funcs;
                 return status;
             }

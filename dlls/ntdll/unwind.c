@@ -2086,13 +2086,23 @@ NTSTATUS WINAPI RtlVirtualUnwind2( ULONG type, ULONG_PTR base, ULONG_PTR pc,
     TRACE( "type %lx base %I64x rip %I64x rva %I64x rsp %I64x\n", type, base, pc, pc - base, context->Rsp );
     if (limit_low || limit_high) FIXME( "limits not supported\n" );
 
-    frame = *frame_ret = context->Rsp;
+    /* CS2 / Source 2 calls into RtlVirtualUnwind2 from its breakpad
+     * collector with NULL output pointers. Guard the writes. */
+    if (frame_ret) frame = *frame_ret = context->Rsp;
+    else frame = context->Rsp;
 
     if (!function)  /* leaf function */
     {
+        if (!is_valid_frame( context->Rsp ))
+        {
+            context->Rip = 0;
+            if (data) *data = NULL;
+            if (handler_ret) *handler_ret = NULL;
+            return STATUS_BAD_FUNCTION_TABLE;
+        }
         context->Rip = *(ULONG64 *)context->Rsp;
         context->Rsp += sizeof(ULONG64);
-        if (type) *data = NULL;
+        if (type && data) *data = NULL;
         if (handler_ret) *handler_ret = NULL;
         return STATUS_SUCCESS;
     }
@@ -2127,7 +2137,7 @@ NTSTATUS WINAPI RtlVirtualUnwind2( ULONG type, ULONG_PTR base, ULONG_PTR pc,
             {
                 TRACE("inside epilog.\n");
                 interpret_epilog( (BYTE *)pc, context, ctx_ptr );
-                *frame_ret = info->frame_reg ? context->Rsp - 8 : frame;
+                if (frame_ret) *frame_ret = info->frame_reg ? context->Rsp - 8 : frame;
                 if (handler_ret) *handler_ret = NULL;
                 return STATUS_SUCCESS;
             }
@@ -2151,7 +2161,8 @@ NTSTATUS WINAPI RtlVirtualUnwind2( ULONG type, ULONG_PTR base, ULONG_PTR pc,
                 context->Rsp += (info->opcodes[i].info + 1) * 8;
                 break;
             case UWOP_SET_FPREG:  /* leaq nn(%rsp),%framereg */
-                context->Rsp = *frame_ret = frame;
+                context->Rsp = frame;
+                if (frame_ret) *frame_ret = frame;
                 break;
             case UWOP_SAVE_NONVOL:  /* movq %reg,n(%rsp) */
                 off = frame + *(USHORT *)&info->opcodes[i+1] * 8;
@@ -2204,7 +2215,15 @@ NTSTATUS WINAPI RtlVirtualUnwind2( ULONG type, ULONG_PTR base, ULONG_PTR pc,
 
     if (!mach_frame)
     {
-        /* now pop return address */
+        /* now pop return address — guard against unwinding past stack base
+         * (CS2's breakpad collector unwinds without checking termination
+         * conditions and walks off the end of stacks under wine-d3dmetal). */
+        if (!is_valid_frame( context->Rsp ))
+        {
+            context->Rip = 0;
+            if (handler_ret) *handler_ret = NULL;
+            return STATUS_BAD_FUNCTION_TABLE;
+        }
         context->Rip = *(ULONG64 *)context->Rsp;
         context->Rsp += sizeof(ULONG64);
     }
@@ -2215,7 +2234,7 @@ NTSTATUS WINAPI RtlVirtualUnwind2( ULONG type, ULONG_PTR base, ULONG_PTR pc,
     if (prolog_offset != ~0) return STATUS_SUCCESS;  /* inside prolog */
 
     if (handler_ret) *handler_ret = (PEXCEPTION_ROUTINE)((char *)base + handler_data->handler);
-    *data = &handler_data->handler + 1;
+    if (data) *data = &handler_data->handler + 1;
     return STATUS_SUCCESS;
 }
 

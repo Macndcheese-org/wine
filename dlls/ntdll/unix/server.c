@@ -1828,6 +1828,29 @@ void server_init_thread( struct thread_data *data )
     data->pthread_id = pthread_self();
     pthread_setspecific( thread_data_key, data );
 
+#if defined(__APPLE__) && defined(__x86_64__)
+    /* MNC HACK 22 v2: install TEB-field mirrors into the Apple TSD slots
+     * BEFORE the first wine syscall on this thread. Without this, the
+     * dispatcher's `movq %gs:0x30, %rcx; movq 0x378(%rcx), %rcx` reads
+     * pthread_teb[6] = 0 (not yet mirrored) and derefs NULL.
+     *
+     * This used to live in start_thread() in unix/thread.c. wine 11.13
+     * deleted that function -- pthread_create now enters server_init_thread
+     * directly -- so the mirrors move here, still ahead of the init_thread
+     * server call and of signal_start_thread. System threads have no TEB,
+     * hence the guard.
+     *
+     * MNC HACK 22 v3: slot 12 (Peb -> gs:0x60) is intentionally OMITTED;
+     * Apple libc owns __PTK_LIBC_LOCALTIME_KEY at slot 12. */
+    if (data->teb)
+    {
+        __asm__ volatile (".byte 0x65\n\tmovq %0,%c1" :: "r" (data->teb->Tib.Self),
+                          "n" (FIELD_OFFSET(TEB, Tib.Self)));
+        __asm__ volatile (".byte 0x65\n\tmovq %0,%c1" :: "r" (data->teb->ThreadLocalStoragePointer),
+                          "n" (FIELD_OFFSET(TEB, ThreadLocalStoragePointer)));
+    }
+#endif
+
     reply_pipe = init_thread_pipe( data );
     SERVER_START_REQ( init_thread )
     {
@@ -1979,8 +2002,13 @@ NTSTATUS WINAPI NtCompareTokens( HANDLE first, HANDLE second, BOOLEAN *equal )
 
 /**************************************************************************
  *           NtClose
+ *
+ * MNC HACK 17: this is the sysv-ABI flavor. The export table entry is taken
+ * by the GPT_ABI_WRAPPER asm trampoline below, which checks the caller's
+ * return-address and either dispatches into msthunk_NtClose (when called
+ * from a ms_abi caller inside libd3dshared) or into this sysv body.
  */
-NTSTATUS WINAPI NtClose( HANDLE handle )
+NTSTATUS WINAPI GPT_IMPORT(NtClose)( HANDLE handle )
 {
     sigset_t sigset;
     HANDLE port;
@@ -2021,6 +2049,17 @@ NTSTATUS WINAPI NtClose( HANDLE handle )
     }
     return ret;
 }
+
+/* MNC HACK 17: ms_abi shim for callers inside libd3dshared.dylib. The
+ * asm trampoline below selects between this thunk and the sysv body
+ * above using the return-address range check populated in loader.c. */
+#if defined(__APPLE__) && defined(__x86_64__)
+NTSTATUS __attribute__((ms_abi)) msthunk_NtClose( HANDLE handle )
+{
+    return sysv_NtClose( handle );
+}
+GPT_ABI_WRAPPER( NtClose );
+#endif
 
 #ifdef _WIN64
 

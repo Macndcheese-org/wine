@@ -27,6 +27,7 @@
 #include "config.h"
 
 #include <assert.h>
+#include <dlfcn.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdlib.h>
@@ -783,6 +784,16 @@ static inline struct thread_data *init_handler( void *sigcontext )
 #ifdef __linux__
     amd64_data->syscall_dispatch = 0; /* SYSCALL_DISPATCH_FILTER_ALLOW */
     if (fs32_sel) arch_prctl( ARCH_SET_FS, amd64_data->pthread_teb );
+#elif defined __APPLE__
+    /* MNC: keep the SYSCALL_CS fixup.  The base drops it along with the gs.base
+     * swap, but it is an Intel-only concern, not a Rosetta one: in a syscall CS
+     * is the kernel's selector (0x07, SYSCALL_CS in xnu) rather than the user
+     * one (cs64_sel, 0x2b), and every later comparison against cs64_sel needs it
+     * corrected.  CI builds on macos-15-intel, and native Intel Macs still run
+     * this engine.
+     */
+    if (CS_sig((ucontext_t *)sigcontext) == 0x07 /* SYSCALL_CS */)
+        CS_sig((ucontext_t *)sigcontext) = cs64_sel;
 #endif
     return data;
 }
@@ -1025,6 +1036,14 @@ NTSTATUS WINAPI NtSetContextThread( HANDLE handle, const CONTEXT *context )
     {
         ret = set_thread_context( handle, context, &self, IMAGE_FILE_MACHINE_AMD64 );
 #ifdef __APPLE__
+        /* MNC HACK 7: Rosetta has no path to program the host x86 debug
+         * registers (no native DR0..DR7 under aarch64 emulation), so a
+         * cross-process NtSetContextThread carrying CONTEXT_DEBUG_REGISTERS
+         * always fails out of the wineserver with STATUS_UNSUCCESSFUL.
+         * Source 2's anti-tamper heartbeat treats that as evidence of a
+         * debugger and aborts engine init. The hardware breakpoints
+         * simply won't function under Rosetta — but the game only cares
+         * that the call APPEARS to succeed. Swallow the failure here. */
         if ((flags & CONTEXT_DEBUG_REGISTERS) && (ret == STATUS_UNSUCCESSFUL))
         {
             /* CW HACK 22131 */
@@ -1262,9 +1281,12 @@ NTSTATUS set_thread_wow64_context( HANDLE handle, const void *ctx, ULONG size )
     {
         NTSTATUS ret = set_thread_context( handle, context, &self, IMAGE_FILE_MACHINE_I386 );
 #ifdef __APPLE__
-        if ((flags & CONTEXT_DEBUG_REGISTERS) && (ret == STATUS_UNSUCCESSFUL))
+        /* CW HACK 22131, corrected: this is the i386 path, so the flag to test
+         * is CONTEXT_I386_DEBUG_REGISTERS (0x10010), not the AMD64
+         * CONTEXT_DEBUG_REGISTERS (0x100010).  Every other flag test in this
+         * function already uses the i386 constant. */
+        if ((flags & CONTEXT_I386_DEBUG_REGISTERS) && (ret == STATUS_UNSUCCESSFUL))
         {
-            /* CW HACK 22131 */
             WARN_(seh)( "Setting debug registers is not supported under Rosetta, faking success\n" );
             ret = STATUS_SUCCESS;
         }
@@ -2215,6 +2237,10 @@ static BOOL handle_syscall_trap( struct thread_data *data, ucontext_t *sigcontex
 {
     struct syscall_frame *frame = get_syscall_frame( data );
 
+    /* MNC: a thread without a TEB has no syscall frame; bail out rather than
+     * dereferencing NULL below. */
+    if (!frame) return FALSE;
+
     /* disallow single-stepping through a syscall */
 
     if ((void *)RIP_sig( sigcontext ) == __wine_syscall_dispatcher
@@ -2891,6 +2917,14 @@ static void *mac_thread_gsbase(void)
     if (kr == KERN_SUCCESS) return (void*)tiinfo.thread_handle;
     return NULL;
 }
+
+/* PATCH-033 / PATCH-068 removed 2026-05-20 (MNC HACK 22 v2): the Apple
+ * per-thread framework primer (dlopen libobjc/libdispatch + dlsym +
+ * synthetic [NSObject self] / dispatch_get_main_queue / touch
+ * _dispatch_main_q during init_syscall_frame) is not present in the reference build,
+ * and was implicated in the silent libc abort during v1 testing. Under v2,
+ * with gs.base permanently pointed at the real pthread_teb, Apple frameworks
+ * initialise their per-thread state lazily on first use — no priming needed. */
 #endif
 
 #ifdef __linux__
@@ -3074,6 +3108,31 @@ void init_syscall_frame( LPTHREAD_START_ROUTINE entry, void *arg, TEB *teb )
         wow_context->EFlags = 0x202;
         wow_context->FloatSave.ControlWord = context.FltSave.ControlWord;
         *(XSAVE_FORMAT *)wow_context->ExtendedRegisters = context.FltSave;
+    }
+
+    /* PATCH-014 (MACNDCHEESE Phase 3 wall fix, defensive belt):
+     *
+     * Initialise frame->rsp BEFORE the optional wait_suspend call. The
+     * problem this guards against: if anything inside wait_suspend faults
+     * (e.g. an unhandled signal, a bogus errno read, …), wine's
+     * segv_handler routes the SIGSEGV through handle_syscall_fault →
+     * __wine_syscall_dispatcher_return, which restores user-mode RSP from
+     * `frame->rsp` (at offset 0x88). If frame->rsp was still zero (the
+     * default mmap'd value), the dispatcher executes `pushq %r11` with
+     * rsp=0 and faults again, kicking off a secondary→tertiary cascade
+     * that ends in setup_raise_exception's memmove writing to a negative
+     * pointer.
+     *
+     * Pre-seed frame->rsp with a safe user-stack address now, so a fault
+     * inside wait_suspend lands at a usable RSP and the dispatcher can
+     * propagate the exception through normal SEH instead of cascading.
+     * The final, "real" frame->rsp assignment below still happens after
+     * wait_suspend returns; this is purely a safety net for the wait
+     * itself. */
+    {
+        CONTEXT *pre_ctx = (CONTEXT *)((ULONG_PTR)context.Rsp & ~15) - 1;
+        frame->rsp = (ULONG64)pre_ctx - 8;
+        frame->rip = (ULONG64)pLdrInitializeThunk;
     }
 
     if (data->suspend) wait_suspend( &context );
