@@ -2094,9 +2094,12 @@ int WINAPI WSAGetServiceClassNameByClassIdW( GUID *class, WCHAR *service, DWORD 
  */
 int WINAPI WSALookupServiceBeginA( WSAQUERYSETA *query, DWORD flags, HANDLE *lookup )
 {
-    FIXME( "(%p %#lx %p) Stub!\n", query, flags, lookup );
-    SetLastError( WSA_NOT_ENOUGH_MEMORY );
-    return -1;
+    FIXME( "(%p %#lx %p) Stub returning empty handle.\n", query, flags, lookup );
+    /* Steam's CEF / Chrome subprocesses (network_change_notifier_win.cc) call
+     * this and crash on WSA_NOT_ENOUGH_MEMORY. Return a fake handle so the
+     * caller proceeds to NEXT/END which both return 'no more results' cleanly. */
+    if (lookup) *lookup = (HANDLE)(uintptr_t)0xDEAD5106;
+    return 0;
 }
 
 
@@ -2105,9 +2108,9 @@ int WINAPI WSALookupServiceBeginA( WSAQUERYSETA *query, DWORD flags, HANDLE *loo
  */
 int WINAPI WSALookupServiceBeginW( WSAQUERYSETW *query, DWORD flags, HANDLE *lookup )
 {
-    FIXME( "(%p %#lx %p) Stub!\n", query, flags, lookup );
-    SetLastError( WSA_NOT_ENOUGH_MEMORY );
-    return -1;
+    FIXME( "(%p %#lx %p) Stub returning empty handle.\n", query, flags, lookup );
+    if (lookup) *lookup = (HANDLE)(uintptr_t)0xDEAD5107;
+    return 0;
 }
 
 

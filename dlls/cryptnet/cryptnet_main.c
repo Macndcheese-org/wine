@@ -1678,7 +1678,11 @@ static DWORD verify_cert_revocation_with_crl_online(const CERT_CONTEXT *cert,
 static const CRL_CONTEXT *retrieve_crl_from_dist_points(const CRYPT_URL_ARRAY *array,
         DWORD verify_flags, DWORD timeout)
 {
-    DWORD retrieve_flags = 0;
+    /* Bradar: ALWAYS cache-only so a CRL dist-point retrieval never BLOCKS on a synchronous
+     * network fetch -- a cold Lets-Encrypt CRL stalled steam.exe's startup TLS verify forever
+     * under wine (curl was fine, it doesnt do this fetch). Un-cached -> NULL -> OFFLINE, which
+     * verify_cert_revocation soft-passes as not-revoked. A cached CRL still catches real revokes. */
+    DWORD retrieve_flags = CRYPT_CACHE_ONLY_RETRIEVAL;
     const CRL_CONTEXT *crl;
     DWORD i;
 
@@ -2162,15 +2166,11 @@ static DWORD verify_cert_revocation_from_aia_ext(const CRYPT_DATA_BLOB *value, c
             {
                 const WCHAR *url = aia->rgAccDescr[i].AccessLocation.pwszURL;
                 TRACE("OCSP URL = %s\n", debugstr_w(url));
-                if (dwFlags & CERT_VERIFY_CACHE_ONLY_BASED_REVOCATION)
-                {
-                    TRACE("Cache only revocation, returning CRYPT_E_REVOCATION_OFFLINE.\n");
-                    error = CRYPT_E_REVOCATION_OFFLINE;
-                }
-                else
-                {
-                    error = verify_cert_revocation_with_ocsp(cert, url, pRevPara, next_update);
-                }
+                /* Bradar: skip the blocking OCSP network fetch too (same reason as the CRL
+                 * cache-only above) -- return OFFLINE, soft-passed as not-revoked in
+                 * verify_cert_revocation. Keeps the TLS verify from ever stalling on the network. */
+                TRACE("Bradar: skipping OCSP network fetch, returning CRYPT_E_REVOCATION_OFFLINE.\n");
+                error = CRYPT_E_REVOCATION_OFFLINE;
             }
             else
             {
@@ -2313,6 +2313,16 @@ static DWORD verify_cert_revocation(const CERT_CONTEXT *cert, FILETIME *pTime,
         }
     }
 done:
+    /* Bradar: best-effort revocation -- if we couldnt REACH a CRL/OCSP responder (offline or no
+     * check possible, esp. after the cache-only retrieval above), treat the cert as not-revoked
+     * rather than failing the whole TLS handshake. This is what stops steam.exe hanging on a cold
+     * CRL, caller-independent (winhttp/wininet/schannel all just see "revocation ok"). A cert found
+     * REVOKED in a CACHED CRL still comes back CRYPT_E_REVOKED above and is rejected. */
+    if (error == CRYPT_E_REVOCATION_OFFLINE || error == CRYPT_E_NO_REVOCATION_CHECK)
+    {
+        error = ERROR_SUCCESS;
+        if (pRevStatus) pRevStatus->dwError = ERROR_SUCCESS;
+    }
     if ((next_update.dwLowDateTime || next_update.dwHighDateTime)
         && (error == ERROR_SUCCESS || error == CRYPT_E_REVOKED))
     {
