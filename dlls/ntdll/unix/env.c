@@ -1898,7 +1898,25 @@ static RTL_USER_PROCESS_PARAMETERS *build_initial_params(void)
     set_env_var( &env, &env_pos, &env_size, bootstrapW, ARRAY_SIZE(bootstrapW), valueW );
     is_prefix_bootstrap = TRUE;
     env[env_pos] = 0;
-    run_wineboot( env, env_pos );
+    /* MNC HACK 29: skip wineboot when WINE_D3DMETAL_SKIP_WINEBOOT=1.
+     *
+     * Use case: launching cs2 via wine-d3dmetal in a prefix where Steam is
+     * already running via a different wine (Wine Stable). Without this gate,
+     * wine-d3dmetal calls run_wineboot which spawns wineboot.exe under
+     * wine-d3dmetal, and wineboot.exe sometimes kills or destabilises the
+     * existing wineserver (it expects to be the only wine in the prefix).
+     * Steam then sees wineserver disappear → crash.
+     *
+     * Skipping wineboot is safe iff the prefix is ALREADY initialised
+     * (which it must be if another wineserver is running for it). The caller
+     * is responsible for only setting this env when those preconditions hold. */
+    {
+        const char *skip = getenv("WINE_D3DMETAL_SKIP_WINEBOOT");
+        if (skip && *skip && *skip != '0')
+            TRACE( "MNC HACK 29: skipping wineboot per WINE_D3DMETAL_SKIP_WINEBOOT=%s\n", skip );
+        else
+            run_wineboot( env, env_pos );
+    }
 
     /* reload environment now that wineboot has run */
     set_env_var( &env, &env_pos, &env_size, pathW, 4, path );  /* reset PATH */

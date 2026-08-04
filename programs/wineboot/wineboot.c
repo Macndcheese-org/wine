@@ -1615,6 +1615,110 @@ static void update_user_profile(void)
 }
 
 /* execute rundll32 on the wine.inf file if necessary */
+/* MNC: clone every PE builtin matching one pattern out of a wine dll dir into the
+ * WoW64 system dir. Retruns how many files got coppied. */
+static DWORD mnc_clone_pe_files( const WCHAR *dir, const WCHAR *dest, const WCHAR *pattern )
+{
+    WCHAR glob[MAX_PATH], src[MAX_PATH], dst[MAX_PATH];
+    WIN32_FIND_DATAW finddata;
+    HANDLE handle;
+    DWORD coppied = 0;
+
+    swprintf( glob, ARRAY_SIZE(glob), L"%s\\%s", dir, pattern );
+    if ((handle = FindFirstFileW( glob, &finddata )) == INVALID_HANDLE_VALUE) return 0;
+    do
+    {
+        if (finddata.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        swprintf( src, ARRAY_SIZE(src), L"%s\\%s", dir, finddata.cFileName );
+        swprintf( dst, ARRAY_SIZE(dst), L"%s\\%s", dest, finddata.cFileName );
+        if (CopyFileW( src, dst, FALSE )) coppied++;
+    } while (FindNextFileW( handle, &finddata ));
+    FindClose( handle );
+    return coppied;
+}
+
+/* MNC: populate the WoW64 system dir with the 32-bit PE builtins natively.
+ *
+ * The stock [Wow64Install] stage does this by running setupapi's InstallHinfSection
+ * inside a 32-bit rundll32. On macOS that emulated i386 INF parse takes upwards of ten
+ * minutes, so it used to get skipped by default here -- but skipping it leaves the i386
+ * slice compleatly EMPTY, so a freshly created prefix has no 32-bit support at all.
+ *
+ * All the INF's WineFakeDlls directive realy does for those entries is COPY the real
+ * i386 PE builtin into syswow64 (a bootstrapped prefix's system32\ntdll.dll is
+ * byte-for-byte the same size as the build's own PE builtin), so we just do that copy
+ * from the fast native side instead and skip the emulated INF parse entirely. The
+ * builtin dirs get resolved exactly the way dlls/setupapi/fakedll.c resolves them:
+ * WINEBUILDDIR for a build tree, otherwise the WINEDLLDIR<n> list.
+ *
+ * What this does NOT do is the rest of [BaseWow64Install]: RegisterDlls (32-bit COM
+ * self-registration), CopyFiles=NlsFiles,WinmdFiles, and the AddReg sections -- whose
+ * writes land in the 32-bit registry view (Wow6432Node) becuase the stock stage runs
+ * them from a 32-bit process. In practice that gap is small and survivable: a prefix
+ * bootstrapped this way lands within ~7 Wow6432Node keys of one that ran the full stock
+ * stage (most of the 32-bit view gets writen by the native DefaultInstall anyway), and
+ * this is exactly the trade the MNC launcher has shipped for months -- its prefixes have
+ * never had the [Wow64Install] AddReg either (0 VCRuntime keys) and 32-bit Steam runs on
+ * them fine. Set MNC_RUN_WOW64_INSTALL=1 to run the full stock stage if something turns
+ * out to need those keys or the COM registration.
+ * Retruns 0 if no builtins could be found, in which case the caller falls back to the
+ * stock stage rather then leaving the slice empty. */
+static DWORD mnc_populate_wow64_dir( WORD machine )
+{
+    WCHAR dest[MAX_PATH], dir[MAX_PATH], var[32], glob[MAX_PATH];
+    static const WCHAR * const top_dirs[] = { L"dlls", L"programs" };
+    const WCHAR *build_dir = _wgetenv( L"WINEBUILDDIR" );
+    const WCHAR *pe_dir, *path;
+    DWORD coppied = 0;
+    unsigned int i;
+
+    switch (machine)
+    {
+    case IMAGE_FILE_MACHINE_I386:  pe_dir = L"i386-windows"; break;
+    case IMAGE_FILE_MACHINE_ARMNT: pe_dir = L"arm-windows"; break;
+    default: return 0;
+    }
+
+    if (!GetSystemWow64Directory2W( dest, MAX_PATH, machine )) return 0;
+    CreateDirectoryW( dest, NULL );
+
+    if (build_dir)
+    {
+        /* build tree: <build>\{dlls,programs}\<name>\<pe_dir>\<name>.{dll,exe} */
+        for (i = 0; i < ARRAY_SIZE(top_dirs); i++)
+        {
+            WIN32_FIND_DATAW finddata;
+            HANDLE handle;
+
+            swprintf( glob, ARRAY_SIZE(glob), L"%s\\%s\\*", build_dir, top_dirs[i] );
+            if ((handle = FindFirstFileW( glob, &finddata )) == INVALID_HANDLE_VALUE) continue;
+            do
+            {
+                if (!(finddata.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+                if (finddata.cFileName[0] == '.') continue;
+                swprintf( dir, ARRAY_SIZE(dir), L"%s\\%s\\%s\\%s",
+                          build_dir, top_dirs[i], finddata.cFileName, pe_dir );
+                coppied += mnc_clone_pe_files( dir, dest, L"*.dll" );
+                coppied += mnc_clone_pe_files( dir, dest, L"*.exe" );
+            } while (FindNextFileW( handle, &finddata ));
+            FindClose( handle );
+        }
+    }
+
+    /* installed tree: <WINEDLLDIR<n>>\<pe_dir>\*.{dll,exe} */
+    for (i = 0; ; i++)
+    {
+        swprintf( var, ARRAY_SIZE(var), L"WINEDLLDIR%u", i );
+        if (!(path = _wgetenv( var ))) break;
+        swprintf( dir, ARRAY_SIZE(dir), L"%s\\%s", path, pe_dir );
+        coppied += mnc_clone_pe_files( dir, dest, L"*.dll" );
+        coppied += mnc_clone_pe_files( dir, dest, L"*.exe" );
+    }
+
+    TRACE( "machine %x populated %s with %lu builtins\n", machine, debugstr_w(dest), coppied );
+    return coppied;
+}
+
 static void update_wineprefix( BOOL force )
 {
     const WCHAR *config_dir = _wgetenv( L"WINECONFIGDIR" );
@@ -1659,6 +1763,20 @@ static void update_wineprefix( BOOL force )
                 if (!machines[count].Machine) break;
                 if (machines[count].Native)
                     process = start_rundll32( inf_path, L"DefaultInstall", IMAGE_FILE_MACHINE_TARGET_HOST );
+                /* MNC: the 32-bit WoW64 InstallHinfSection stage runs its setupapi INF
+                 * parse inside an emulated i386 rundll32, which on macOS grinds for ten
+                 * minutes or more vs ~1s for the identical native 64-bit DefaultInstall
+                 * - by far the largest chunk of prefix-creation time. This used to be
+                 * skipped outright for that reason, which left the i386 slice EMPTY and
+                 * silently gave every standalone user of this engine a prefix with no
+                 * 32-bit support at all. Instead we now populate the WoW64 system dir
+                 * natively (fast), and only fall back to the stock stage if that turns
+                 * up no builtins. MNC_RUN_WOW64_INSTALL=1 forces the full stock stage
+                 * for anything that needs its 32-bit COM registration or AddReg keys
+                 * (see mnc_populate_wow64_dir for exactly what gets left out). */
+                else if (!_wgetenv( L"MNC_RUN_WOW64_INSTALL" ) &&
+                         mnc_populate_wow64_dir( machines[count].Machine ))
+                    process = 0;
                 else
                     process = start_rundll32( inf_path, L"Wow64Install", machines[count].Machine );
                 count++;
