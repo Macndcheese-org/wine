@@ -50,7 +50,8 @@ static bool device_data_valid;  /* do the above variables have up-to-date values
 
 bool retina_on = false;
 
-static pthread_mutex_t device_data_mutex = PTHREAD_MUTEX_INITIALIZER;
+/* PATCH-008: recursive device_data_mutex (macOS Rosetta re-entrant driver init). */
+static pthread_mutex_t device_data_mutex = PTHREAD_RECURSIVE_MUTEX_INITIALIZER; /* MNC: static recursive, no constructor (load-order safe) */
 
 static const struct user_driver_funcs macdrv_funcs;
 
@@ -194,12 +195,25 @@ static BOOL macdrv_DeleteDC(PHYSDEV dev)
 }
 
 
+/* The retina HORZRES/VERTRES doubling below compensates for win32u scaling GetDeviceCaps
+ * DOWN for a DPI-unaware process. The monitor rect is already stored in doubled
+ * coordinates, so for a process that IS dpi-aware nothing is scaled down and the doubling
+ * applies twice -- measured 5880x3824 against a 2940x1912 monitor on an app marked
+ * HIGHDPIAWARE. Only compensate when there is something to compensate for. */
+static BOOL macdrv_process_is_dpi_unaware(void)
+{
+    ULONG context = NtUserGetProcessDpiAwarenessContext( GetCurrentProcess() );
+    return NTUSER_DPI_CONTEXT_GET_AWARENESS( context ) == DPI_AWARENESS_UNAWARE;
+}
+
+
 /***********************************************************************
  *              GetDeviceCaps (MACDRV.@)
  */
 static INT macdrv_GetDeviceCaps(PHYSDEV dev, INT cap)
 {
     INT ret;
+
 
     pthread_mutex_lock(&device_data_mutex);
 
@@ -219,7 +233,7 @@ static INT macdrv_GetDeviceCaps(PHYSDEV dev, INT cap)
         pthread_mutex_unlock(&device_data_mutex);
         dev = GET_NEXT_PHYSDEV( dev, pGetDeviceCaps );
         ret = dev->funcs->pGetDeviceCaps( dev, cap );
-        if ((cap == HORZRES || cap == VERTRES) && retina_on)
+        if ((cap == HORZRES || cap == VERTRES) && retina_on && macdrv_process_is_dpi_unaware())
             ret *= 2;
         return ret;
     }
@@ -231,11 +245,76 @@ static INT macdrv_GetDeviceCaps(PHYSDEV dev, INT cap)
 }
 
 
+/***********************************************************************
+ *              ExtEscape (MACDRV.@)
+ */
+static INT macdrv_ExtEscape(PHYSDEV dev, INT escape, INT in_count, LPCVOID in_data,
+                            INT out_count, LPVOID out_data)
+{
+    switch (escape)
+    {
+    case QUERYESCSUPPORT:
+        if (in_data && in_count >= sizeof(DWORD))
+        {
+            switch (*(const INT *)in_data)
+            {
+            case MACDRV_ESCAPE_GET_SURFACE:
+            case MACDRV_ESCAPE_RELEASE_SURFACE:
+                return TRUE;
+            }
+        }
+        break;
+
+    case MACDRV_ESCAPE_GET_SURFACE:
+    {
+        struct macdrv_escape_surface *data = out_data;
+        struct macdrv_client_surface *surface;
+        struct client_surface *client;
+        HWND hwnd = NtUserWindowFromDC(dev->hdc);
+
+        if (out_count < sizeof(*data)) return FALSE;
+
+        /* wine 11.13 renamed macdrv_client_surface_create(hwnd) to
+         * macdrv_CreateClientSurface(hwnd, pixel_format) returning the generic
+         * client_surface. The macdrv implementation ignores the pixel format. */
+        if (!hwnd || !(client = macdrv_CreateClientSurface(hwnd, 0))) return FALSE;
+        surface = impl_from_client_surface(client);
+
+        if (!macdrv_client_surface_acquire_metal_swapchain(surface))
+        {
+            client_surface_release(&surface->client);
+            return FALSE;
+        }
+
+        data->surface = (UINT_PTR)surface;
+        data->layer = (UINT_PTR)macdrv_swapchain_get_layer(surface->metal_swapchain);
+        return TRUE;
+    }
+    case MACDRV_ESCAPE_RELEASE_SURFACE:
+    {
+        const struct macdrv_escape_surface *data = in_data;
+        struct macdrv_client_surface *surface;
+
+        if (in_count < sizeof(*data)) return FALSE;
+
+        if (!data) return FALSE;
+
+        surface = (struct macdrv_client_surface *)(UINT_PTR)data->surface;
+        if (surface) client_surface_release(&surface->client);
+        return TRUE;
+    }
+    }
+
+    return FALSE;
+}
+
+
 static const struct user_driver_funcs macdrv_funcs =
 {
     .dc_funcs.pCreateCompatibleDC = macdrv_CreateCompatibleDC,
     .dc_funcs.pCreateDC = macdrv_CreateDC,
     .dc_funcs.pDeleteDC = macdrv_DeleteDC,
+    .dc_funcs.pExtEscape = macdrv_ExtEscape,
     .dc_funcs.pGetDeviceCaps = macdrv_GetDeviceCaps,
     .dc_funcs.pGetDeviceGammaRamp = macdrv_GetDeviceGammaRamp,
     .dc_funcs.pSetDeviceGammaRamp = macdrv_SetDeviceGammaRamp,
