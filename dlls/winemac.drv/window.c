@@ -216,6 +216,27 @@ void release_win_data(struct macdrv_win_data *data)
 
 
 /***********************************************************************
+ *              mnc_d3dmetal_get_content_view  (MNC HACK 9)
+ *
+ * Public helper for the D3DMetal bridge: resolve an HWND to the
+ * WineContentView of its backing NSWindow, returned as macdrv_view.
+ * We look up the macdrv_window under the win_data lock, drop the lock,
+ * then hop into the Cocoa main thread (via the helper in cocoa_window.m)
+ * to read the contentView property safely.
+ */
+macdrv_view mnc_d3dmetal_get_content_view(HWND hwnd)
+{
+    extern macdrv_view mnc_d3dmetal_content_view_from_cocoa_window(macdrv_window w);
+    macdrv_window w = NULL;
+    struct macdrv_win_data *data = get_win_data(hwnd);
+    if (data) w = data->cocoa_window;
+    release_win_data(data);
+    if (!w) return NULL;
+    return mnc_d3dmetal_content_view_from_cocoa_window(w);
+}
+
+
+/***********************************************************************
  *              macdrv_get_cocoa_window
  *
  * Return the Mac window associated with the full area of a window

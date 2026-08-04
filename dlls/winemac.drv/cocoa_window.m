@@ -32,6 +32,7 @@
 #import "cocoa_event.h"
 #import "cocoa_opengl.h"
 #import "dxmt_objc.h"
+#import "mnc_metal_layer.h"   /* MNC HACK 14: MNCMetalLayer */
 
 #pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
 
@@ -373,6 +374,33 @@ static inline BOOL stage_manager_enabled(void)
         }
         return self;
     }
+
+    /* MNC HACK 33c (2026-05-22): mark WineContentView as accessibility-
+     * ignored so macOS's accessibility tree walker skips it.
+     *
+     * macOS accessibility periodically scans every NSWindow's view tree
+     * and queries text rects via -[NSTextInputContext unionRectForCharacterRange:].
+     * Inside that method AppKit calls NSAccessibilitySetObjectValueForAttribute,
+     * which uses tagged-pointer dispatch that crashes on wine PE threads
+     * (CGFloat → non-canonical RIP → SIGSEGV → PATCH-027 parks the thread).
+     * The parked thread held wine internal locks; cocoa main thread blocks
+     * on those locks waiting for callbacks → "Application not responding".
+     *
+     * `accessibilityIsIgnored` returning YES is the OLD-API contract that
+     * removes this view from the accessibility tree. Unlike
+     * `isAccessibilityElement` (new API) it does NOT affect mouse hit
+     * testing — clicks still reach the view normally via NSResponder chain.
+     * The view becomes invisible to accessibility scanners (VoiceOver,
+     * Automator etc.) but normal Win32 widget rendering and input continue
+     * to work.
+     *
+     * This fixes the dominant "Application not responding" cause for
+     * macOS-26+ cs2 / D3D11 game launches under wine-d3dmetal. */
+    - (BOOL) accessibilityIsIgnored
+    {
+        return YES;
+    }
+
 
     - (void) dealloc
     {
@@ -745,6 +773,35 @@ static inline BOOL stage_manager_enabled(void)
      */
     - (NSTextInputContext*) inputContext
     {
+        /* MNC HACK 33 (2026-05-22): under wine-d3dmetal, return nil so AppKit
+         * never associates an NSTextInputContext with the view.
+         *
+         * Crash chain we kept seeing under cs2:
+         *   NSTextInputContext queries our view → our firstRectForCharacterRange
+         *   returns NSRect{200,200,110,32} → NSTextInputContext's
+         *   unionRectForCharacterRange post-processes the rect via
+         *   NSAccessibilitySetObjectValueForAttribute, which uses tagged-
+         *   pointer dispatch → on a wine PE thread the dispatch jumps to
+         *   the CGFloat value 200.0 (0x4069000000000000) as if it were a
+         *   function pointer → non-canonical RIP → PATCH-027 parks the
+         *   thread → cs2 eventually dies.
+         *
+         * Returning nil makes AppKit treat the view as non-text-editable,
+         * so the unionRectForCharacterRange chain never starts. Cost: IME
+         * input (Japanese/Chinese composition) won't work on wine windows
+         * in this mode. cs2 / Source 2 games don't use macOS IME, so this
+         * is a safe trade for the games we ship under wine-d3dmetal.
+         *
+         * Env-gated: WINE_D3DMETAL_DISABLE_NSTEXTINPUT=1 enables. macncheese
+         * sets this for wine-d3dmetal launches; regular wine keeps IME. */
+        static int disable_cached = -1;
+        if (disable_cached == -1)
+        {
+            const char *v = getenv("WINE_D3DMETAL_DISABLE_NSTEXTINPUT");
+            disable_cached = (v && *v && *v != '0') ? 1 : 0;
+        }
+        if (disable_cached) return nil;
+
         if (!markedText)
             markedText = [[NSMutableAttributedString alloc] init];
         return [super inputContext];
@@ -839,6 +896,40 @@ static inline BOOL stage_manager_enabled(void)
     {
         NSRect ret;
 
+        /* MNC HACK 33b (2026-05-22): when DISABLE_NSTEXTINPUT is set, return
+         * NSZeroRect synchronously. AppKit's accessibility framework
+         * (NSAccessibilitySetObjectValueForAttribute via
+         * -[NSTextInputContext unionRectForCharacterRange:]) post-processes
+         * the returned rect through tagged-pointer dispatch that crashes on
+         * wine PE threads when the rect contains non-zero CGFloats — the
+         * upper 16 bits of CGFloats get treated as function-pointer high
+         * bits → non-canonical RIP → PATCH-027 parks the thread → cs2 hangs.
+         *
+         * Returning NSZeroRect makes the rect (0,0,0,0). When AppKit's
+         * tagged-pointer dispatch loads NULL as a "receiver", Obj-C treats
+         * it as nil and the message send is a safe no-op. The crash chain
+         * is broken. AppKit's nil-rect early-out also tends to skip the
+         * problematic accessibility callback entirely.
+         *
+         * Setting inputContext=nil isn't enough on its own — AppKit can
+         * still build its own NSTextInputContext from our view's
+         * NSTextInputClient protocol conformance. This is the belt-and-
+         * braces fix that actually neutralizes the data flowing into the
+         * crashing AppKit code. */
+        {
+            static int disable_cached = -1;
+            if (disable_cached == -1)
+            {
+                const char *v = getenv("WINE_D3DMETAL_DISABLE_NSTEXTINPUT");
+                disable_cached = (v && *v && *v != '0') ? 1 : 0;
+            }
+            if (disable_cached)
+            {
+                if (actualRange) *actualRange = NSMakeRange(0, 0);
+                return NSZeroRect;
+            }
+        }
+
         aRange = NSIntersectionRange(aRange, NSMakeRange(0, [markedText length]));
 
         pthread_mutex_lock(&ime_composition_rect_mutex);
@@ -893,7 +984,14 @@ static inline BOOL stage_manager_enabled(void)
 
     - (CALayer*) makeBackingLayer
     {
-        CAMetalLayer *layer = [WineMetalLayer layer];
+        /* MNC HACK 14: MNCMetalLayer is a WineMetalLayer subclass; its
+         * -nextDrawable posts a present-notification for views the D3DMetal
+         * bridge tagged, then chains to WineMetalLayer, which does the same
+         * for DXMT-tagged views.  Steam (esp. steamwebhelper.exe) must keep
+         * the canonical DXMT present path, so it gets a plain WineMetalLayer
+         * with no D3DMetal override above it. */
+        CAMetalLayer *layer = mnc_is_steam_process() ? [WineMetalLayer layer]
+                                                     : [MNCMetalLayer layer];
         layer.device = _device;
         layer.framebufferOnly = YES;
         layer.magnificationFilter = kCAFilterNearest;
@@ -3723,7 +3821,28 @@ id<MTLDevice> macdrv_create_metal_device(void)
 {
 @autoreleasepool
 {
-    return MTLCreateSystemDefaultDevice();
+    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+
+    /* MNC HACK 32: pre-warm [device newCommandQueue] off a libdispatch worker
+     * the first time a Metal device is created, so AGX -[...Device setupDeferred]
+     * runs in clean Apple context (not a wine PE thread, which SIGFPEs in
+     * createFastIntegerDivideBufferIfNeeded). Required for D3DMetal games.
+     * GATED (restores the breakthrough config): skipped for Steam (DXMT) — an
+     * ungated AGX prewarm races DXMT's own Metal-device init in Steam's
+     * webhelper -> GpuControl.CreateCommandBuffer failure -> CEF GPU crash-loop.
+     * Only game (D3DMetal) processes prewarm. */
+    if (device && !mnc_is_steam_process())
+    {
+        static dispatch_once_t agx_warm_once;
+        dispatch_once(&agx_warm_once, ^{
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                id<MTLCommandQueue> q = [device newCommandQueue];
+                (void)q; /* process-lifetime sentinel keeps AGX init state alive */
+            });
+        });
+    }
+
+    return device;
 }
 }
 
@@ -4085,4 +4204,26 @@ void macdrv_clear_ime_text(void)
         if (window)
             [[window contentView] clearMarkedText];
     });
+}
+
+/***********************************************************************
+ *              mnc_d3dmetal_content_view_from_cocoa_window
+ *
+ * MNC HACK 9 helper (Cocoa-side): given a macdrv_window cast back to a
+ * WineWindow, fetch its contentView. Called from window.c after it has
+ * already resolved the HWND->WineWindow mapping with the lock dropped.
+ * Runs the AppKit access on the Cocoa main thread.
+ */
+macdrv_view mnc_d3dmetal_content_view_from_cocoa_window(macdrv_window w)
+{
+@autoreleasepool
+{
+    WineWindow *win = (WineWindow*)w;
+    if (!win) return NULL;
+    __block NSView *content = nil;
+    OnMainThread(^{
+        content = [win contentView];
+    });
+    return (macdrv_view)content;
+}
 }

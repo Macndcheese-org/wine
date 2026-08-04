@@ -345,4 +345,23 @@ static inline UINT asciiz_to_unicode(WCHAR *dst, const char *src)
     return (p - dst) * sizeof(WCHAR);
 }
 
+/* ExtEscape definitions
+ *
+ * From winehq MR 10935 / 11058. Upstream took the MetalViewSwapChain and
+ * CALayerHost halves of that work (52e03c61e4e, 1a63b0d7c43) but not this
+ * escape interface, which is how the PE side reaches the swapchain's
+ * CAMetalLayer -- so it stays a local patch. */
+
+enum macdrv_escape_codes
+{
+    MACDRV_ESCAPE_GET_SURFACE = 6790,
+    MACDRV_ESCAPE_RELEASE_SURFACE,
+};
+
+struct macdrv_escape_surface
+{
+    UINT64 surface;
+    UINT64 layer;
+};
+
 #endif  /* __WINE_MACDRV_H */

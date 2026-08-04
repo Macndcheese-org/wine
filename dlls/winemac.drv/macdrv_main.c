@@ -26,6 +26,8 @@
 
 #include "config.h"
 
+#include <stdlib.h>
+
 #include <Security/AuthSession.h>
 #include <IOKit/pwr_mgt/IOPMLib.h>
 
@@ -40,6 +42,66 @@ WINE_DEFAULT_DEBUG_CHANNEL(macdrv);
     ((ch) == 'y' || (ch) == 'Y' || (ch) == 't' || (ch) == 'T' || (ch) == '1')
 
 C_ASSERT(NUM_EVENT_TYPES <= sizeof(macdrv_event_mask) * 8);
+
+/* MNC: identify Steam-family processes by PE image basename, so winemac.drv
+ * can suppress the GPTK D3DMetal hooks (MNCMetalLayer subclass / present
+ * bridge) for Steam exes that must keep the canonical DXMT present path.
+ * This MUST mirror ntdll is_steam_client_process() exactly (same exe set,
+ * same MNC_STEAM_DXMT=0 override, same no-cache-on-NULL-params guard) so the
+ * ntdll d3d11->d3d11_d3dm rename gate and the winemac hook gate never
+ * disagree for a given process. Cached: computed once, cheap from
+ * -makeBackingLayer. */
+int mnc_is_steam_process(void)
+{
+    static int cached = -1;
+
+    if (cached == -1)
+    {
+        /* Explicit WCHAR (2-byte) arrays: this unix TU is NOT built with
+         * -fshort-wchar, so L"..." would be 4-byte wchar_t and mismatch WCHAR. */
+        static const WCHAR steam_exe[]          = {'s','t','e','a','m','.','e','x','e',0};
+        static const WCHAR steamwebhelper_exe[] = {'s','t','e','a','m','w','e','b','h','e','l','p','e','r','.','e','x','e',0};
+        static const WCHAR steamservice_exe[]   = {'s','t','e','a','m','s','e','r','v','i','c','e','.','e','x','e',0};
+        static const WCHAR steamerror_exe[]     = {'s','t','e','a','m','e','r','r','o','r','r','e','p','o','r','t','e','r','.','e','x','e',0};
+        static const WCHAR steamerror64_exe[]   = {'s','t','e','a','m','e','r','r','o','r','r','e','p','o','r','t','e','r','6','4','.','e','x','e',0};
+        static const WCHAR gameoverlayui_exe[]  = {'g','a','m','e','o','v','e','r','l','a','y','u','i','.','e','x','e',0};
+        static const WCHAR streaming_exe[]      = {'s','t','r','e','a','m','i','n','g','_','c','l','i','e','n','t','.','e','x','e',0};
+        static const WCHAR * const steam_exes[] = {
+            steam_exe, steamwebhelper_exe, steamservice_exe, steamerror_exe,
+            steamerror64_exe, gameoverlayui_exe, streaming_exe,
+        };
+        RTL_USER_PROCESS_PARAMETERS *params = NtCurrentTeb()->Peb->ProcessParameters;
+        const UNICODE_STRING *img;
+        WCHAR basename[64];
+        unsigned int i, len, start;
+        const char *override;
+        int result = 0;
+
+        /* early wow64/i386 init can reach us before process parameters exist;
+         * don't fault and don't cache the (wrong) answer */
+        if (!params) return FALSE;
+        img = &params->ImagePathName;
+        len = img->Length / sizeof(WCHAR);
+        start = len;
+
+        while (start > 0 && img->Buffer[start - 1] != '\\' && img->Buffer[start - 1] != '/') start--;
+        if (len - start > 0 && len - start < ARRAY_SIZE(basename))
+        {
+            memcpy( basename, img->Buffer + start, (len - start) * sizeof(WCHAR) );
+            basename[len - start] = 0;
+            for (i = 0; i < ARRAY_SIZE(steam_exes); i++)
+                if (!wcsicmp( basename, steam_exes[i] )) { result = 1; break; }
+        }
+        /* MNC_STEAM_DXMT=0 forces a Steam exe onto D3DMetal. Read from the host
+         * env (getenv) since the unix ntdll.so does not export
+         * RtlQueryEnvironmentVariable_U; the launcher exports this to host env,
+         * mirroring ntdll's Windows-env-block override. */
+        if (result && (override = getenv( "MNC_STEAM_DXMT" )) && override[0] == '0')
+            result = 0;
+        cached = result;
+    }
+    return cached;
+}
 
 int topmost_float_inactive = TOPMOST_FLOAT_INACTIVE_NONFULLSCREEN;
 bool capture_displays_for_fullscreen = false;
@@ -786,7 +848,24 @@ static void my_macdrv_view_release_metal_view(macdrv_metal_view v)
     return macdrv_view_release_metal_view(v);
 }
 
-DECLSPEC_EXPORT struct macdrv_functions_t macdrv_functions =
+/* Renamed off "macdrv_functions" -- d3dmetal_bridge.c exports that name, and two
+ * definitions of it is a duplicate symbol at link time.
+ *
+ * The two tables are not interchangeable, so this is not a matter of picking
+ * either. Their first ten slots line up, but slots 2 and 3 hand back different
+ * structures: this one returns dxmt_macdrv_win_data (pinned at 120 bytes below),
+ * while the bridge returns the layout GPTK expects, with the WineContentView at
+ * offset 24. Whichever d3d library dlsym's the name has to get the table built
+ * for it.
+ *
+ * MacNdCheese ships its own DXMT, which reaches winemac.drv through
+ * winemetal.dll and never looks this up, so the name goes to the bridge and this
+ * table is currently dead. It is kept, rather than deleted, because it is the
+ * whole CodeWeavers-side integration and moving to their DXMT build would just
+ * mean swapping which of the two carries the name. Leaving it under a distinct
+ * name also means their DXMT fails its symbol lookup outright instead of
+ * silently binding to a table whose win_data it will misread. */
+DECLSPEC_EXPORT struct macdrv_functions_t macdrv_functions_dxmt =
 {
     &my_macdrv_init_display_devices,
     &my_get_win_data,
@@ -802,6 +881,11 @@ DECLSPEC_EXPORT struct macdrv_functions_t macdrv_functions =
 
 void macdrv_client_surface_presented(const macdrv_event *event)
 {
+    /* MNC: guard the dereference.  Both present paths reach here --
+     * WineMetalLayer for DXMT and MNCMetalLayer for D3DMetal -- and a view
+     * tagged by neither must not fault. */
+    if (!event || !event->client_surface_presented.client_surface) return;
+
     TRACE("client_surface %p\n", event->client_surface_presented.client_surface);
 
     client_surface_present(event->client_surface_presented.client_surface);
