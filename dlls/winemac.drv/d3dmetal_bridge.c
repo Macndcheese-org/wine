@@ -111,8 +111,24 @@ extern macdrv_view mnc_d3dmetal_get_content_view(HWND hwnd);
  * so a single per-thread buffer is sufficient. */
 static __thread struct mnc_pe_win_data mnc_pe_win_data_scratch;
 
+/* MNC HACK 32 gate: set the first time GPTK's PE side actually uses this
+ * bridge.  Nothing but D3DMetal reaches these entry points -- DXMT talks to
+ * winemetal instead -- so this is a true "D3DMetal is driving this process"
+ * signal, and it is set before macdrv_create_metal_device() because GPTK's
+ * fixed sequence is get_win_data -> create_metal_device -> view_create_metal_view.
+ * It replaces the old exe-name list, which only approximated the same thing and
+ * mis-classified any non-Steam process rendering through DXMT. */
+static int mnc_d3dmetal_bridge_active;
+
+int mnc_d3dmetal_in_use(void)
+{
+    return mnc_d3dmetal_bridge_active;
+}
+
 static struct macdrv_win_data *mnc_bridge_get_win_data(HWND hwnd)
 {
+    mnc_d3dmetal_bridge_active = 1;
+
     /* MNC HACK 14 (extends MNC HACK 9): create a dedicated wine
      * client_surface for this swap-chain so we can route present-
      * notifications through it. The client_surface has its own
