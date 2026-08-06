@@ -628,15 +628,12 @@ extern pthread_mutex_t ime_composition_rect_mutex;
 extern CGRect ime_composition_rect;
 extern void macdrv_clear_ime_text(void);
 
-extern void macdrv_client_surface_presented(const macdrv_event *event);
-extern void *macdrv_get_view_dxmt_client_surface(macdrv_view v);
-void macdrv_set_view_dxmt_client_surface(macdrv_view v, void *client_surface);
-/* MNC: per-process gate for the winemac D3DMetal hooks. Steam-family exes
- * (incl. steamwebhelper.exe) return 1 and must keep the canonical DXMT path;
- * game/program processes return 0 and get the GPTK D3DMetal hooks. Defined in
- * macdrv_main.c (unix side); callable from cocoa_window.m (ObjC) since both
+/* MNC HACK 32: per-process gate for the AGX prewarm.  True once GPTK's PE side
+ * has used the D3DMetal bridge, i.e. exactly when D3DMetal is driving this
+ * process; DXMT never reaches those entry points.  Defined in
+ * d3dmetal_bridge.c (unix side); callable from cocoa_window.m (ObjC) since both
  * link into winemac.so. */
-extern int mnc_is_steam_process(void);
+extern int mnc_d3dmetal_in_use(void);
 
 /* The base's DXMT present bridge. Two independent tags live on the same view --
  * this one and the D3DMetal pair below -- which is what lets MNCMetalLayer chain

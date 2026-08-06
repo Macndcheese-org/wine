@@ -984,14 +984,20 @@ static inline BOOL stage_manager_enabled(void)
 
     - (CALayer*) makeBackingLayer
     {
-        /* MNC HACK 14: MNCMetalLayer is a WineMetalLayer subclass; its
-         * -nextDrawable posts a present-notification for views the D3DMetal
-         * bridge tagged, then chains to WineMetalLayer, which does the same
-         * for DXMT-tagged views.  Steam (esp. steamwebhelper.exe) must keep
-         * the canonical DXMT present path, so it gets a plain WineMetalLayer
-         * with no D3DMetal override above it. */
-        CAMetalLayer *layer = mnc_is_steam_process() ? [WineMetalLayer layer]
-                                                     : [MNCMetalLayer layer];
+        /* MNC HACK 14: MNCMetalLayer subclass intercepts -nextDrawable to post a
+         * present-notification.  It is safe unconditionally, because it gates
+         * itself: the event is posted only for a view the D3DMetal bridge tagged
+         * with a client_surface, and every other view (DXMT, wined3d, ...) falls
+         * straight through to [super nextDrawable], i.e. behaves exactly like a
+         * stock CAMetalLayer.  CrossOver does the same with its equivalent
+         * WineMetalLayer and has no process gate at all.
+         *
+         * The old gate keyed on an exe-name list ("Steam" as a proxy for "renders
+         * through DXMT").  That was redundant here, and wrong for any non-Steam
+         * process that renders through DXMT -- and worse, evaluating it from this
+         * method faulted: AppKit calls -makeBackingLayer on the Cocoa main
+         * thread, which has no TEB, so reading NtCurrentTeb()->Peb crashed. */
+        CAMetalLayer *layer = [MNCMetalLayer layer];
         layer.device = _device;
         layer.framebufferOnly = YES;
         layer.magnificationFilter = kCAFilterNearest;
@@ -3827,11 +3833,13 @@ id<MTLDevice> macdrv_create_metal_device(void)
      * the first time a Metal device is created, so AGX -[...Device setupDeferred]
      * runs in clean Apple context (not a wine PE thread, which SIGFPEs in
      * createFastIntegerDivideBufferIfNeeded). Required for D3DMetal games.
-     * GATED (restores the breakthrough config): skipped for Steam (DXMT) — an
-     * ungated AGX prewarm races DXMT's own Metal-device init in Steam's
-     * webhelper -> GpuControl.CreateCommandBuffer failure -> CEF GPU crash-loop.
-     * Only game (D3DMetal) processes prewarm. */
-    if (device && !mnc_is_steam_process())
+     * GATED: only when D3DMetal is actually driving this process.  An ungated
+     * prewarm races DXMT's own Metal-device init (-> GpuControl.CreateCommandBuffer
+     * failure -> CEF GPU crash-loop), so DXMT processes must not prewarm.  The
+     * gate used to be an exe-name list with "Steam" standing in for "uses DXMT";
+     * mnc_d3dmetal_in_use() asks the D3DMetal bridge directly instead, which is
+     * true exactly when GPTK is driving and works for any process name. */
+    if (device && mnc_d3dmetal_in_use())
     {
         static dispatch_once_t agx_warm_once;
         dispatch_once(&agx_warm_once, ^{
