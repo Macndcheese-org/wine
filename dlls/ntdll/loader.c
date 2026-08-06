@@ -1021,6 +1021,14 @@ static NTSTATUS walk_node_dependencies( LDR_DDAG_NODE *node, void *context,
     return status;
 }
 
+/* Export forwarders chain, since the export a forwarder names may be a
+ * forwarder in turn, and nothing stops a chain from coming back to a module it
+ * has already been through.  Chains that terminate are one or two hops, so cap
+ * the depth rather than recurse until the thread stack is gone.  The loader
+ * section is held throughout, so a plain static suffices. */
+#define MAX_FORWARD_DEPTH 16
+static unsigned int forward_depth;
+
 /*************************************************************************
  *		find_forwarded_export
  *
@@ -1038,6 +1046,7 @@ static FARPROC find_forwarded_export( HMODULE module, const char *forward, LPCWS
     BOOL wm_loaded = FALSE;
 
     if (!end) return NULL;
+    if (forward_depth >= MAX_FORWARD_DEPTH) return NULL;
     if (build_import_name( importer, mod_name, forward, end - forward )) return NULL;
 
     if (!(wm = find_basename_module( mod_name )))
@@ -1072,6 +1081,7 @@ static FARPROC find_forwarded_export( HMODULE module, const char *forward, LPCWS
     {
         const char *name = end + 1;
 
+        forward_depth++;
         if (*name == '#') { /* ordinal */
             proc = find_ordinal_export( wm->ldr.DllBase, exports, exp_size,
                                         atoi(name+1) - exports->Base, load_path,
@@ -1079,9 +1089,10 @@ static FARPROC find_forwarded_export( HMODULE module, const char *forward, LPCWS
         } else
             proc = find_named_export( wm->ldr.DllBase, exports, exp_size, name, -1, load_path,
                                       importer, is_dynamic );
+        forward_depth--;
     }
 
-    if (!proc)
+    if (!proc && !forward_depth)
     {
         ERR("function not found for forward '%s' used by %s."
             " If you are using builtin %s, try using the native one instead.\n",
