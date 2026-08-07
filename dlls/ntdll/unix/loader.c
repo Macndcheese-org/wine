@@ -466,8 +466,111 @@ char *get_alternate_wineloader( WORD machine )
 }
 
 
-static void preloader_exec( char **argv )
+/* MNC: RosettaHack x87 + JIT (ROSETTA_X87_PATH).
+ *
+ * Rosetta emulates x87 through a slow generic path, which dominates the frame
+ * time of older 32-bit titles -- they do their float maths on the x87 stack,
+ * not in SSE.  ROSETTA_X87_PATH names an external loader (rosettax87_jit's
+ * runtime_loader) that patches Rosetta's x87 handlers in the target process and
+ * then execs it.  We hand it the wine loader in place of exec'ing that
+ * ourselves, so the whole wine process -- and every PE thread in it -- runs on
+ * the patched handlers.
+ *
+ * Only for i386 targets.  A 64-bit PE does its float work in SSE and never
+ * reaches those handlers, so routing it through the loader would buy nothing
+ * and cost a ptrace attach plus a Mach exception server per process.
+ *
+ * Ported from Gcenx's HACK in winehq-staging-11.6 (a88be522fcf), with the
+ * refinement gamesir-labs later made: decide from the *target PE's* machine
+ * rather than from the machine word that picks a loader.  Those are not the
+ * same thing -- reexec_loader deliberately asks for the 32-bit loader on a
+ * 64-bit host so 32-bit prefixes keep working -- and conflating them is why the
+ * original had to comment out both get_alternate_wineloader() and that default.
+ * Carrying the decision separately leaves the wow64 loader selection alone.
+ */
+static BOOL get_initial_unix_pe_machine( const char *unix_name, WORD *machine )
 {
+    IMAGE_DOS_HEADER dos;
+    struct
+    {
+        DWORD signature;
+        IMAGE_FILE_HEADER file;
+    } nt;
+    int fd;
+
+    *machine = IMAGE_FILE_MACHINE_UNKNOWN;
+    if (!unix_name || (fd = open( unix_name, O_RDONLY )) == -1) return FALSE;
+
+    if (pread( fd, &dos, sizeof(dos), 0 ) != sizeof(dos) ||
+        dos.e_magic != IMAGE_DOS_SIGNATURE ||
+        dos.e_lfanew <= 0 ||
+        pread( fd, &nt, sizeof(nt), dos.e_lfanew ) != sizeof(nt) ||
+        nt.signature != IMAGE_NT_SIGNATURE)
+    {
+        close( fd );
+        return FALSE;
+    }
+
+    close( fd );
+    *machine = nt.file.Machine;
+    return TRUE;
+}
+
+/* winedbg is a 32-bit PE like any other, so the machine test alone sends the
+ * debugger through runtime_loader too -- and runtime_loader debugs what it
+ * launches. winedbg then comes up already under a debug session and cannot take
+ * the one it was spawned for: every crash dump reads "Couldn't get first
+ * exception for process ... No backtrace available". Keep the debugger out of it
+ * so a crash stays diagnosable. It runs no game code, so it loses nothing. */
+static BOOL is_wine_debugger( const char *name )
+{
+    const char *p;
+
+    if (!name) return FALSE;
+    for (p = name + strlen( name ); p > name; p--)
+        if (p[-1] == '/' || p[-1] == '\\') break;
+    return !strncmp( p, "winedbg", 7 );
+}
+
+static BOOL use_rosetta_x87_loader( WORD machine )
+{
+    const char *path = getenv( "ROSETTA_X87_PATH" );
+
+    return path && path[0] && machine == IMAGE_FILE_MACHINE_I386;
+}
+
+/* The initial "wine /unix/path/app.exe" never goes through exec_wineloader(), so
+ * there is no pe_image_info to read the machine from; peek at the file instead. */
+static BOOL should_exec_initial_rosetta_loader( int argc, char *argv[] )
+{
+    WORD machine;
+
+    if (!getenv( "ROSETTA_X87_PATH" ) || argc <= 1 || !argv[1]) return FALSE;
+    if (!get_initial_unix_pe_machine( argv[1], &machine )) return FALSE;
+    return use_rosetta_x87_loader( machine );
+}
+
+/* runtime_loader is arm64; an x86_64 DYLD_INSERT_LIBRARIES would abort dyld
+ * before it ever gets to exec wine.  Move it aside under a name dyld ignores so
+ * the value survives for anything downstream that wants to put it back. */
+static void stash_dyld_insert_libraries_for_rosetta_loader(void)
+{
+    const char *existing = getenv( "DYLD_INSERT_LIBRARIES" );
+
+    if (!existing || !existing[0])
+    {
+        unsetenv( "ROSETTA_X87_SAVED_DYLD_INSERT_LIBRARIES" );
+        return;
+    }
+
+    if (!setenv( "ROSETTA_X87_SAVED_DYLD_INSERT_LIBRARIES", existing, 1 ))
+        unsetenv( "DYLD_INSERT_LIBRARIES" );
+}
+
+
+static void preloader_exec( char **argv, BOOL rosetta_x87 )
+{
+    char *path;
 #ifdef HAVE_WINE_PRELOADER
     asprintf( &argv[0], "%s-preloader", argv[1] );
 #ifdef __APPLE__
@@ -482,20 +585,36 @@ static void preloader_exec( char **argv )
     execv( argv[0], argv );
     free( argv[0] );
 #endif
+    /* argv[1] is the wine loader and argv[2...] its arguments; runtime_loader
+     * takes the program to run as its own argv[1] and execs it with argv+1, so
+     * the layout it wants is exactly ours with the loader path left in place. */
+    /* argv[2] is the program in both callers: the unix exe path from
+     * reexec_loader, the windows one from exec_wineloader. */
+    if (rosetta_x87 && argv[2] && is_wine_debugger( argv[2] )) rosetta_x87 = FALSE;
+
+    if (rosetta_x87 && (path = getenv( "ROSETTA_X87_PATH" )) && path[0])
+    {
+        stash_dyld_insert_libraries_for_rosetta_loader();
+        argv[0] = strdup( path );
+        execv( argv[0], argv );
+        /* falls through to the normal exec when the loader is missing or
+         * unauthorised -- a slow game beats no game */
+        free( argv[0] );
+    }
     execv( argv[1], argv + 1 );
 }
 
 /* exec the appropriate wine loader for the specified machine */
-static NTSTATUS loader_exec( char **argv, WORD machine )
+static NTSTATUS loader_exec( char **argv, WORD machine, BOOL rosetta_x87 )
 {
     static char noexec[] = "WINELOADERNOEXEC=1";
 
     putenv( noexec );
 
-    if (((argv[1] = get_alternate_wineloader( machine )))) preloader_exec( argv );
+    if (((argv[1] = get_alternate_wineloader( machine )))) preloader_exec( argv, rosetta_x87 );
 
     argv[1] = strdup( wineloader );
-    preloader_exec( argv );
+    preloader_exec( argv, rosetta_x87 );
     return STATUS_INVALID_IMAGE_FORMAT;
 }
 
@@ -525,7 +644,9 @@ NTSTATUS exec_wineloader( char **argv, int socketfd, const struct pe_image_info 
     putenv( preloader_reserve );
     putenv( socket_env );
 
-    return loader_exec( argv, machine );
+    /* every child process decides for itself: a 64-bit exe launched by a 32-bit
+     * one gets the plain loader, and vice versa */
+    return loader_exec( argv, machine, use_rosetta_x87_loader( machine ) );
 }
 
 
@@ -2351,10 +2472,15 @@ static int pre_exec(void)
 static void reexec_loader( int argc, char *argv[], char *extra_arg )
 {
     WORD machine = current_machine;
+    /* read off the command line, not off `machine`: the latter is about which
+     * loader to exec and gets forced to i386 below to keep 32-bit prefixes
+     * working, which would drag every 64-bit title through the x87 loader too */
+    BOOL rosetta_x87 = !extra_arg && should_exec_initial_rosetta_loader( argc, argv );
     char **new_argv;
 
     /* have to exec if we have a preloader, or an argument, or if we are the initial wrapper */
-    if (!pre_exec() && !extra_arg && dlsym( RTLD_DEFAULT, "wine_main_preload_info" )) return;
+    if (!pre_exec() && !extra_arg && !rosetta_x87 &&
+        dlsym( RTLD_DEFAULT, "wine_main_preload_info" )) return;
 
     if (extra_arg)
     {
@@ -2371,7 +2497,7 @@ static void reexec_loader( int argc, char *argv[], char *extra_arg )
     /* default to 32-bit loader to support 32-bit prefixes */
     if (machine == IMAGE_FILE_MACHINE_AMD64) machine = IMAGE_FILE_MACHINE_I386;
 
-    loader_exec( new_argv, machine );
+    loader_exec( new_argv, machine, rosetta_x87 );
     fatal_error( "could not exec the wine loader\n" );
 }
 
