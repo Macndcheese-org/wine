@@ -1417,15 +1417,68 @@ static inline BOOL stage_manager_enabled(void)
         [self adjustFullScreenBehavior:behavior];
     }
 
+    /* -addChildWindow: resets the window level of the window being attached and
+       of the parent's other children.  That isn't documented, but it is known
+       AppKit behaviour which other projects work around the same way.  Without
+       this, a child which had been elevated -- for example because it is in
+       front of a full-screen window -- is silently dropped to the parent's
+       level and then drawn behind the full-screen window, even though Win32
+       places it above.
+
+       A child window is also grouped with its parent in the Win32 Z-order, so
+       a newly attached child belongs at the same level as the parent's other
+       children rather than at the parent's own level.  Work that out first,
+       then attach and put every level back. */
+    - (void) attachChildWineWindow:(WineWindow*)child
+    {
+        NSMutableArray* windows = [NSMutableArray array];
+        NSMutableArray* levels = [NSMutableArray array];
+        NSInteger groupLevel = [self level];
+        WineWindow* other;
+        NSUInteger i;
+
+        for (other in [self childWineWindows])
+        {
+            // Only consider siblings of the same kind: a WS_EX_TOPMOST child
+            // sits in a higher band than an ordinary one, so it must not drag
+            // an ordinary sibling up with it.
+            if (other.floating != child.floating)
+                continue;
+            if ([other level] > groupLevel)
+                groupLevel = [other level];
+        }
+        if (groupLevel > [child level])
+            [child setLevel:groupLevel];
+
+        [windows addObject:self];
+        [levels addObject:[NSNumber numberWithInteger:[self level]]];
+        for (other in [self childWineWindows])
+        {
+            [windows addObject:other];
+            [levels addObject:[NSNumber numberWithInteger:[other level]]];
+        }
+        [windows addObject:child];
+        [levels addObject:[NSNumber numberWithInteger:[child level]]];
+
+        [self addChildWindow:child ordered:NSWindowAbove];
+
+        for (i = 0; i < [windows count]; i++)
+        {
+            WineWindow* window = [windows objectAtIndex:i];
+            NSInteger level = [[levels objectAtIndex:i] integerValue];
+
+            if ([window level] != level)
+                [window setLevel:level];
+        }
+    }
+
     - (BOOL) addChildWineWindow:(WineWindow*)child assumeVisible:(BOOL)assumeVisible
     {
         BOOL reordered = FALSE;
 
         if ([self isVisible] && (assumeVisible || [child isVisible]) && (self.floating || !child.floating))
         {
-            if ([self level] > [child level])
-                [child setLevel:[self level]];
-            [self addChildWindow:child ordered:NSWindowAbove];
+            [self attachChildWineWindow:child];
             [latentChildWindows removeObjectIdenticalTo:child];
             child.latentParentWindow = nil;
             reordered = TRUE;
@@ -1482,7 +1535,7 @@ static inline BOOL stage_manager_enabled(void)
         for (i = start; i < count; i++)
         {
             WineWindow* child = childWindows[i];
-            [self addChildWindow:child ordered:NSWindowAbove];
+            [self attachChildWineWindow:child];
         }
     }
 
