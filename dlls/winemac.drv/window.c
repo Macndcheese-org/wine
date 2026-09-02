@@ -1152,6 +1152,26 @@ static void macdrv_client_surface_present(struct client_surface *client, HDC hdc
     release_win_data(data);
 }
 
+static void macdrv_client_surface_unused(struct client_surface *client)
+{
+    struct macdrv_client_surface *surface = impl_from_client_surface(client);
+    struct macdrv_win_data *data;
+
+    TRACE("%s\n", debugstr_client_surface(client));
+
+    /* The surface keeps the contents it last presented, hide its view so that it doesn't
+     * occlude the window surface when the window is drawn with GDI again. */
+    if ((data = get_win_data(client->hwnd)))
+    {
+        if (data->client_view == surface->cocoa_view)
+        {
+            macdrv_set_view_hidden(surface->cocoa_view, TRUE);
+            data->client_view = NULL;
+        }
+        release_win_data(data);
+    }
+}
+
 static const struct client_surface_funcs macdrv_client_surface_funcs =
 {
     .size = sizeof(struct macdrv_client_surface),
@@ -1159,6 +1179,7 @@ static const struct client_surface_funcs macdrv_client_surface_funcs =
     .detach = macdrv_client_surface_detach,
     .update = macdrv_client_surface_update,
     .present = macdrv_client_surface_present,
+    .unused = macdrv_client_surface_unused,
 };
 
 struct macdrv_client_surface *impl_from_client_surface(struct client_surface *client)
