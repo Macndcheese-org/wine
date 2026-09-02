@@ -257,6 +257,8 @@ struct client_surface_funcs
     void (*update)( struct client_surface *surface );
     /* present the client surface if necessary, hdc != NULL when offscreen, called from render thread */
     void (*present)( struct client_surface *surface, HDC hdc );
+    /* the surface is no longer presenting and its contents are stale, optional */
+    void (*unused)( struct client_surface *surface );
 };
 
 struct client_surface

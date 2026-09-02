@@ -487,6 +487,7 @@ void use_window_client_surface( struct client_surface *surface, BOOL use )
         list_remove( &surface->entry ); /* remove it from client_surfaces, if it was used */
         list_add_head( &unused_surfaces, &surface->entry ); /* add it to the head, so we discard older ones */
         client_surface_add_ref( surface );
+        if (surface->funcs->unused) surface->funcs->unused( surface );
     }
 
     pthread_mutex_unlock( &surfaces_lock );
