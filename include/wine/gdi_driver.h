@@ -260,6 +260,8 @@ struct client_surface_funcs
     void (*present)( struct client_surface *surface, HDC hdc );
     /* try to set the client surface color space directly for vulkan pass-through */
     BOOL (*set_color_space)( struct client_surface *surface, VkColorSpaceKHR color_space );
+    /* the surface is no longer presenting and its contents are stale, optional */
+    void (*unused)( struct client_surface *surface );
 };
 
 struct client_surface
