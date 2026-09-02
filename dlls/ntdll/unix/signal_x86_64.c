@@ -1820,6 +1820,70 @@ NTSTATUS WINAPI NtCallbackReturn( void *ret_ptr, ULONG ret_len, NTSTATUS status 
 
 #ifdef __APPLE__
 /***********************************************************************
+ *           handle_reserved_nop
+ *
+ * Check if the fault location is a reserved-NOP opcode that Rosetta refuses to
+ * translate. Intel reserves 0F 18..0F 1E as NOPs taking a modrm operand, and
+ * hardware executes them as no-ops, but Rosetta only implements the encodings
+ * compilers actually emit. Copy protections use the others as filler (0F 19 in
+ * Assassin's Creed Origins), so skip the instruction the way hardware would.
+ *
+ * MNC HACK 35: widens CW HACK 20186, which covers only CET's 0F 1E and assumes
+ * a register-form modrm. The general case needs the real instruction length --
+ * advancing by a fixed amount would leave RIP inside the instruction.
+ */
+static inline BOOL handle_reserved_nop( ucontext_t *sigcontext, CONTEXT *context )
+{
+    BYTE instr[16], modrm, mod, rm;
+    unsigned int i = 0, len, ilen;
+
+    len = virtual_uninterrupted_read_memory( (BYTE *)context->Rip, instr, sizeof(instr) );
+
+    while (i < len)  /* skip prefixes */
+    {
+        BYTE b = instr[i];
+        if (b == 0x2e || b == 0x36 || b == 0x3e || b == 0x26 ||   /* segment */
+            b == 0x64 || b == 0x65 || b == 0x66 || b == 0x67 ||   /* fs/gs, opsize, addrsize */
+            b == 0xf0 || b == 0xf2 || b == 0xf3 ||                /* lock, repne, repe */
+            (b >= 0x40 && b <= 0x4f))                             /* rex */
+        {
+            if (++i >= 15) return FALSE;
+            continue;
+        }
+        break;
+    }
+
+    if (i + 2 >= len) return FALSE;
+    if (instr[i] != 0x0f) return FALSE;
+    if (instr[i + 1] < 0x18 || instr[i + 1] > 0x1e) return FALSE;
+
+    modrm = instr[i + 2];
+    mod = modrm >> 6;
+    rm = modrm & 7;
+    ilen = i + 3;  /* prefixes + 0f + opcode + modrm */
+
+    if (mod != 3)
+    {
+        if (rm == 4)  /* a SIB byte follows the modrm */
+        {
+            if (ilen >= len) return FALSE;
+            if (!mod && (instr[ilen] & 7) == 5) ilen += 4;  /* no base, disp32 */
+            ilen++;
+        }
+        else if (!mod && rm == 5) ilen += 4;  /* rip-relative disp32 */
+
+        if (mod == 1) ilen += 1;
+        else if (mod == 2) ilen += 4;
+    }
+
+    if (ilen > len) return FALSE;
+
+    RIP_sig(sigcontext) += ilen;
+    TRACE_(seh)( "skipped reserved NOP 0f %02x, length %u\n", instr[i + 1], ilen );
+    return TRUE;
+}
+
+/***********************************************************************
  *           handle_cet_nop
  *
  * Check if the fault location is an Intel CET instruction that should be treated as a NOP.
@@ -2404,6 +2468,8 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
 #ifdef __APPLE__
         /* CW HACK 20186 */
         if (handle_cet_nop( sigcontext, &context.c )) return;
+        /* MNC HACK 35 */
+        if (handle_reserved_nop( sigcontext, &context.c )) return;
         /* CW HACK 23427 */
         if (emulate_xgetbv( sigcontext, &context.c )) return;
 #endif
