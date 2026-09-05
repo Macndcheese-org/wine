@@ -300,6 +300,18 @@ static enum install_res install_from_default_dir(void)
 
     if ((package_dir = _wgetenv( L"WINEBUILDDIR" )))
     {
+        /* MNC: look inside the build tree's own share/wine first. The engine ships as a
+         * build tree and is distributed as a single archive, so its gecko/mono packages
+         * have to live INSIDE it -- the stock WINEBUILDDIR/.. lookup points outside the
+         * archive, and the INSTALL_DATADIR fallback below is baked to the build machine's
+         * path and so never resolves on a user's system. */
+        dir_buf = malloc( wcslen(package_dir) * sizeof(WCHAR) + sizeof(L"\\share\\wine\\") );
+        lstrcpyW( dir_buf, package_dir );
+        lstrcatW( dir_buf, L"\\share\\wine\\" );
+        ret = install_from_file( dir_buf, addon->subdir_name, addon->file_name );
+        free( dir_buf );
+        if (ret != INSTALL_NEXT) return ret;
+
         dir_buf = malloc( wcslen(package_dir) * sizeof(WCHAR) + sizeof(L"\\..\\") );
         lstrcpyW( dir_buf, package_dir );
         lstrcatW( dir_buf, L"\\..\\" );
