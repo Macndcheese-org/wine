@@ -758,15 +758,6 @@ static INT_PTR CALLBACK installer_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
 
 BOOL install_addon(addon_t addon_type)
 {
-    /* MNC 2026-06-28: skip the wine-mono / wine-gecko auto-install. Under Rosetta
-     * x86_64 the mono support MSI spawns a 32-bit helper (removeuserinstalls-x86.exe)
-     * that hits the i386 W^X fault storm - millions of NtQueryInformationProcess
-     * syscalls - turning `wineboot -u` from ~10s into 5+ minutes (this is the real
-     * cause of the prefix-creation hang). Steam and the D3DMetal game targets use
-     * neither .NET nor Gecko so the install is pure cost. Skipping it makes prefix
-     * creation fast with no env overrides. To restore stock behaviour delete this. */
-    return TRUE;
-
     addon = addons_info+addon_type;
 
     if(!*addon->arch)
