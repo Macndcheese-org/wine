@@ -280,6 +280,7 @@ W32KAPI void *client_surface_create( const struct client_surface_funcs *funcs, H
 W32KAPI void client_surface_add_ref( struct client_surface *surface );
 W32KAPI void client_surface_release( struct client_surface *surface );
 W32KAPI void client_surface_present( struct client_surface *surface );
+W32KAPI void use_window_client_surface( struct client_surface *surface, BOOL use );
 W32KAPI void update_client_surfaces( HWND hwnd );
 W32KAPI void detach_client_surfaces( HWND hwnd );
 
