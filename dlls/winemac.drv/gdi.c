@@ -286,6 +286,15 @@ static INT macdrv_ExtEscape(PHYSDEV dev, INT escape, INT in_count, LPCVOID in_da
             return FALSE;
         }
 
+        /* Register the surface as the window's client surface, exactly as the GL and
+         * Vulkan paths do. Without this the surface is on no list, so neither
+         * update_client_surfaces() (driven by WindowPosChanged) nor client_surface_present()
+         * ever refreshes its geometry -- and a client like DXMT, which acquires the layer
+         * once and then presents straight to Metal, keeps whatever frame the window happened
+         * to have at acquire time. Steam's CEF child window is momentarily 0x0 right then,
+         * which left a zero-area view that silently swallowed every later present. */
+        use_window_client_surface(client, TRUE);
+
         data->surface = (UINT_PTR)surface;
         data->layer = (UINT_PTR)macdrv_swapchain_get_layer(surface->metal_swapchain);
         return TRUE;
@@ -300,7 +309,11 @@ static INT macdrv_ExtEscape(PHYSDEV dev, INT escape, INT in_count, LPCVOID in_da
         if (!data) return FALSE;
 
         surface = (struct macdrv_client_surface *)(UINT_PTR)data->surface;
-        if (surface) client_surface_release(&surface->client);
+        if (surface)
+        {
+            use_window_client_surface(&surface->client, FALSE);
+            client_surface_release(&surface->client);
+        }
         return TRUE;
     }
     }
