@@ -276,8 +276,10 @@ static INT macdrv_ExtEscape(PHYSDEV dev, INT escape, INT in_count, LPCVOID in_da
 
         /* wine 11.13 renamed macdrv_client_surface_create(hwnd) to
          * macdrv_CreateClientSurface(hwnd, pixel_format) returning the generic
-         * client_surface. The macdrv implementation ignores the pixel format. */
-        if (!hwnd || !(client = macdrv_CreateClientSurface(hwnd, 0))) return FALSE;
+         * client_surface. The macdrv implementation ignores the pixel format.
+         * 11.17 added the raw (physical coordinates) flag; like win32u's Vulkan
+         * surfaces, this one follows the window in its own coordinates. */
+        if (!hwnd || !(client = macdrv_CreateClientSurface(hwnd, 0, FALSE))) return FALSE;
         surface = impl_from_client_surface(client);
 
         if (!macdrv_client_surface_acquire_metal_swapchain(surface))
