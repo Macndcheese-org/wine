@@ -133,6 +133,16 @@ DECLARE_PROTO(MTLDevice);
 DECLARE_PROTO(WineMetalSwapChain);
 #undef DECLARE_INTERFACE
 
+/* Wine 11.18 dropped the opaque macdrv_* handle typedefs in favour of the class
+ * names above.  The DXMT client-surface shim and the MNC D3DMetal bridge still
+ * exchange these handles with the PE side under the old names (the D3DMetal
+ * win_data layout is pinned by GPTK), so keep them as plain aliases. */
+typedef WineWindow *macdrv_window;
+typedef WineContentView *macdrv_view;
+typedef WineMetalView *macdrv_metal_view;
+typedef CAMetalLayer *macdrv_metal_layer;
+typedef id_MTLDevice macdrv_metal_device;
+
 struct macdrv_event;
 struct macdrv_query;
 
