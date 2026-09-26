@@ -148,8 +148,9 @@ static struct macdrv_win_data *mnc_bridge_get_win_data(HWND hwnd)
     /* wine 11.13 renamed macdrv_client_surface_create(hwnd) to
      * macdrv_CreateClientSurface(hwnd, pixel_format) and moved it to the
      * generic client_surface return type. The pixel format is unused by the
-     * macdrv implementation, so 0 keeps the old behaviour. */
-    struct client_surface *client = macdrv_CreateClientSurface(hwnd, 0);
+     * macdrv implementation, so 0 keeps the old behaviour; raw (added in
+     * 11.17) stays FALSE, as for win32u's Vulkan surfaces. */
+    struct client_surface *client = macdrv_CreateClientSurface(hwnd, 0, FALSE);
     struct macdrv_client_surface *surface = client ? impl_from_client_surface(client) : NULL;
 
     /* get_win_data must follow create_surface or the win_data lock
