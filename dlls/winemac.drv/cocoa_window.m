@@ -1300,6 +1300,7 @@ static inline BOOL stage_manager_enabled(void)
         {
             CGFloat top = NSHeight([self frame]) - NSMaxY([self contentLayoutRect]);
             if (top > 0 && top < 200) w2sTop = top;
+            [self w2sUpdateSidebarInset];
         }
     }
 
