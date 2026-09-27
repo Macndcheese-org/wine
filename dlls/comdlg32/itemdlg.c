@@ -2364,13 +2364,123 @@ static INT_PTR CALLBACK itemdlg_dlgproc(HWND hwnd, UINT umessage, WPARAM wparam,
     return FALSE;
 }
 
+/* MNC Win32-to-SwiftUI: the chosen files, as GetOpenFileName returns them
+ * ("path" or "dir\0name\0name\0\0"), become the dialog's results. */
+static BOOL w2s_set_results(FileDialogImpl *This, const WCHAR *file)
+{
+    const WCHAR *names = file + lstrlenW(file) + 1;
+    PIDLIST_ABSOLUTE pidla[256];
+    IShellFolder *psf_desktop;
+    WCHAR path[MAX_PATH];
+    UINT count = 0, i;
+    HRESULT hr;
+
+    if (!*names)
+        pidla[count++] = SHSimpleIDListFromPath(file);
+    else
+        for (; *names && count < ARRAY_SIZE(pidla); names += lstrlenW(names) + 1)
+        {
+            PathCombineW(path, file, names);
+            pidla[count++] = SHSimpleIDListFromPath(path);
+        }
+
+    if (This->psia_results)
+    {
+        IShellItemArray_Release(This->psia_results);
+        This->psia_results = NULL;
+    }
+    hr = SHGetDesktopFolder(&psf_desktop);
+    if (SUCCEEDED(hr))
+    {
+        hr = SHCreateShellItemArray(NULL, psf_desktop, count, (PCUITEMID_CHILD_ARRAY)pidla, &This->psia_results);
+        IShellFolder_Release(psf_desktop);
+    }
+    for (i = 0; i < count; i++) ILFree(pidla[i]);
+    return SUCCEEDED(hr);
+}
+
+/* MNC Win32-to-SwiftUI: the macOS open/save panel when the native UI is on.
+ * win32swiftui.dll is only loaded (by user32) then; it gets the dialog's state
+ * as an OPENFILENAMEW plus its FOS_* options. A dialog with the app's own
+ * controls (IFileDialogCustomize) keeps wine's dialog. */
+static BOOL w2s_show(FileDialogImpl *This, HWND parent, HRESULT *hr)
+{
+    BOOL (WINAPI *pW2SItemDialog)(OPENFILENAMEW *, BOOL, DWORD, BOOL *);
+    HMODULE module = GetModuleHandleW(L"win32swiftui.dll");
+    OPENFILENAMEW ofn = { sizeof(ofn) };
+    WCHAR *filter = NULL, *folder = NULL, *file, *p;
+    UINT i, len = 1;
+    BOOL handled = FALSE, chosen;
+
+    if (!module || !(pW2SItemDialog = (void *)GetProcAddress(module, "W2SItemDialog"))) return FALSE;
+    if (!list_empty(&This->cctrls)) return FALSE;
+
+    for (i = 0; i < This->filterspec_count; i++)
+        len += lstrlenW(This->filterspecs[i].pszName) + lstrlenW(This->filterspecs[i].pszSpec) + 2;
+    if (This->filterspec_count)
+    {
+        filter = p = malloc(len * sizeof(WCHAR));
+        for (i = 0; i < This->filterspec_count; i++)
+        {
+            lstrcpyW(p, This->filterspecs[i].pszName);
+            p += lstrlenW(p) + 1;
+            lstrcpyW(p, This->filterspecs[i].pszSpec);
+            p += lstrlenW(p) + 1;
+        }
+        *p = 0;
+    }
+    if (This->psi_setfolder) IShellItem_GetDisplayName(This->psi_setfolder, SIGDN_FILESYSPATH, &folder);
+    else if (This->psi_defaultfolder) IShellItem_GetDisplayName(This->psi_defaultfolder, SIGDN_FILESYSPATH, &folder);
+
+    file = calloc(32768, sizeof(WCHAR));
+    if (This->set_filename) lstrcpynW(file, This->set_filename, 32768);
+    ofn.hwndOwner = parent;
+    ofn.lpstrFilter = filter;
+    ofn.nFilterIndex = This->filetypeindex + 1;
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = 32768;
+    ofn.lpstrInitialDir = folder;
+    ofn.lpstrTitle = This->custom_title;
+    ofn.lpstrDefExt = This->default_ext;
+
+    for (;;)
+    {
+        if (!pW2SItemDialog(&ofn, This->dlg_type == ITEMDLG_TYPE_SAVE, This->options, &chosen)) break;
+        handled = TRUE;
+        if (!chosen)
+        {
+            *hr = HRESULT_FROM_WIN32(ERROR_CANCELLED);
+            break;
+        }
+        This->filetypeindex = ofn.nFilterIndex ? ofn.nFilterIndex - 1 : 0;
+        if (!w2s_set_results(This, file))
+        {
+            *hr = E_FAIL;
+            break;
+        }
+        if (events_OnFileOk(This) == S_OK)
+        {
+            *hr = S_OK;
+            break;
+        }
+        /* the app refused the choice (IFileDialogEvents::OnFileOk): ask again */
+    }
+    free(file);
+    free(filter);
+    CoTaskMemFree(folder);
+    return handled;
+}
+
 static HRESULT create_dialog(FileDialogImpl *This, HWND parent)
 {
     ULONG_PTR ctx_cookie = 0;
     INT_PTR res;
+    HRESULT hr = E_FAIL;
 
     if (This->dlg_hwnd)
         return E_UNEXPECTED;
+
+    if (w2s_show(This, parent, &hr)) return hr;
 
     if (!GetCurrentActCtx(&This->user_actctx))
         This->user_actctx = INVALID_HANDLE_VALUE;
