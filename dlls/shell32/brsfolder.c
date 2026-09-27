@@ -1197,6 +1197,34 @@ LPITEMIDLIST WINAPI SHBrowseForFolderA (LPBROWSEINFOA lpbi)
 }
 
 
+/* MNC Win32-to-SwiftUI: the macOS open panel in folder mode when the native UI
+ * is on. win32swiftui.dll is only loaded (by user32) then; it runs the app's
+ * callback and returns the chosen folder's path, or declines (computers,
+ * printers) and wine's dialog runs. */
+static BOOL w2s_browse_for_folder( BROWSEINFOW *lpbi, LPITEMIDLIST *ret )
+{
+    BOOL (WINAPI *pW2SBrowseForFolder)( BROWSEINFOW *, WCHAR *, BOOL * );
+    HMODULE module = GetModuleHandleW( L"win32swiftui.dll" );
+    WCHAR path[MAX_PATH], *name;
+    SHFILEINFOW info;
+    BOOL chosen;
+
+    if (!module || !(pW2SBrowseForFolder = (void *)GetProcAddress( module, "W2SBrowseForFolder" ))) return FALSE;
+    if (!pW2SBrowseForFolder( lpbi, path, &chosen )) return FALSE;
+    *ret = chosen ? ILCreateFromPathW( path ) : NULL;
+    if (*ret && lpbi->pszDisplayName)
+    {
+        if (SHGetFileInfoW( (const WCHAR *)*ret, 0, &info, sizeof(info), SHGFI_PIDL | SHGFI_DISPLAYNAME ))
+            lstrcpynW( lpbi->pszDisplayName, info.szDisplayName, MAX_PATH );
+        else
+        {
+            name = wcsrchr( path, '\\' );
+            lstrcpynW( lpbi->pszDisplayName, name && name[1] ? name + 1 : path, MAX_PATH );
+        }
+    }
+    return TRUE;
+}
+
 /*************************************************************************
  * SHBrowseForFolderW [SHELL32.@]
  *
@@ -1210,6 +1238,9 @@ LPITEMIDLIST WINAPI SHBrowseForFolderW (LPBROWSEINFOW lpbi)
     HRESULT hr;
     const WCHAR * templateName;
     INITCOMMONCONTROLSEX icex;
+    LPITEMIDLIST pidl;
+
+    if (w2s_browse_for_folder( lpbi, &pidl )) return pidl;
 
     info.hWnd = 0;
     info.pidlRet = NULL;
