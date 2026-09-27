@@ -342,7 +342,7 @@ static inline BOOL stage_manager_enabled(void)
 
     - (BOOL)acceptsFirstResponder
     {
-        return [[self window] contentView] == self;
+        return [(WineWindow*)[self window] wineContentView] == self;
     }
 
     - (BOOL) mouseDownCanMoveWindow
@@ -430,7 +430,7 @@ static inline BOOL stage_manager_enabled(void)
         CGRect imageRect;
         CALayer* layer = [self layer];
 
-        if ([window contentView] != self)
+        if ([window wineContentView] != self)
             return;
 
         if (window.closing)
@@ -575,7 +575,7 @@ static inline BOOL stage_manager_enabled(void)
     {
         BOOL invalidateAncestors = _cachedHasGLDescendantValid;
         _cachedHasGLDescendantValid = NO;
-        if (invalidateAncestors && self != [[self window] contentView])
+        if (invalidateAncestors && self != [(WineWindow*)[self window] wineContentView])
         {
             WineContentView* superview = (WineContentView*)[self superview];
             if ([superview isKindOfClass:[WineContentView class]])
@@ -1105,6 +1105,13 @@ static inline BOOL stage_manager_enabled(void)
 
     - (void) dealloc
     {
+        /* MNC Win32-to-SwiftUI: a native sidebar's observer goes before its item */
+        if (w2sSplit)
+        {
+            [w2sSidebarItem removeObserver:w2sToolbarDelegate forKeyPath:@"collapsed"];
+            [w2sSplit release];
+            [w2sToolbarDelegate release];
+        }
         [[[NSWorkspace sharedWorkspace] notificationCenter] removeObserver:self];
         [[NSNotificationCenter defaultCenter] removeObserver:self];
         [queue release];
@@ -1112,6 +1119,54 @@ static inline BOOL stage_manager_enabled(void)
         [latentParentWindow release];
         [contentViewMaskLayer release];
         [super dealloc];
+    }
+
+    /* MNC Win32-to-SwiftUI: the view wine draws in (mnc_w2s.m). With a native
+       sidebar the window's content is a split view and wine's view sits in
+       its detail pane; otherwise this is the content view. */
+    - (NSView*) wineContentView
+    {
+        return w2sWineView ? w2sWineView : [self contentView];
+    }
+
+    /* MNC Win32-to-SwiftUI: with a native sidebar, wine's content is the
+       window less the sidebar (left) and the toolbar (top). With
+       NSWindowStyleMaskFullSizeContentView super's content rect equals the
+       frame. */
+    - (NSRect) contentRectForFrameRect:(NSRect)frame
+    {
+        NSRect r = [super contentRectForFrameRect:frame];
+        if (w2sSplit && !([self styleMask] & NSWindowStyleMaskFullScreen))
+        {
+            r.origin.x += w2sLeading;
+            r.size.width -= w2sLeading;
+            r.size.height -= w2sTop;
+        }
+        return r;
+    }
+
+    - (NSRect) frameRectForContentRect:(NSRect)r
+    {
+        if (w2sSplit && !([self styleMask] & NSWindowStyleMaskFullScreen))
+        {
+            r.origin.x -= w2sLeading;
+            r.size.width += w2sLeading;
+            r.size.height += w2sTop;
+        }
+        return [super frameRectForContentRect:r];
+    }
+
+    /* An AppKit content size for a wine content size: setContentMin/MaxSize:
+       constrain the outer content, which with a sidebar is wider and taller
+       than wine's. */
+    - (NSSize) w2sOuterSizeForWineSize:(NSSize)wineSize
+    {
+        if (w2sSplit && !([self styleMask] & NSWindowStyleMaskFullScreen))
+        {
+            NSRect outer = [self frameRectForContentRect:NSMakeRect(0, 0, wineSize.width, wineSize.height)];
+            return outer.size;
+        }
+        return wineSize;
     }
 
     - (BOOL) preventResizing
@@ -1145,14 +1200,14 @@ static inline BOOL stage_manager_enabled(void)
 
         if ([self preventResizing])
         {
-            NSSize size = [self contentRectForFrameRect:self.wine_fractionalFrame].size;
+            NSSize size = [self w2sOuterSizeForWineSize:[self contentRectForFrameRect:self.wine_fractionalFrame].size];
             [self setContentMinSize:size];
             [self setContentMaxSize:size];
         }
         else
         {
-            [self setContentMaxSize:savedContentMaxSize];
-            [self setContentMinSize:savedContentMinSize];
+            [self setContentMaxSize:[self w2sOuterSizeForWineSize:savedContentMaxSize]];
+            [self setContentMinSize:[self w2sOuterSizeForWineSize:savedContentMinSize]];
         }
 
         if (allow_immovable_windows || cursor_clipping_locks_windows)
@@ -1224,8 +1279,8 @@ static inline BOOL stage_manager_enabled(void)
 
             // -setStyleMask: resets the firstResponder to the window.  Set it
             // back to the content view.
-            if ([[self contentView] acceptsFirstResponder])
-                [self makeFirstResponder:[self contentView]];
+            if ([[self wineContentView] acceptsFirstResponder])
+                [self makeFirstResponder:[self wineContentView]];
 
             [self adjustFullScreenBehavior:[self collectionBehavior]];
 
@@ -1236,6 +1291,16 @@ static inline BOOL stage_manager_enabled(void)
         resizable = wf->resizable;
         [self adjustFeaturesForState];
         [self setHasShadow:wf->shadow];
+
+        /* MNC Win32-to-SwiftUI: style bits this doesn't manage (like the
+           native sidebar's FullSizeContentView, kept through currentStyle
+           above) survive; a changed titlebar moves the toolbar, so with a
+           sidebar remeasure it. */
+        if (w2sSplit)
+        {
+            CGFloat top = NSHeight([self frame]) - NSMaxY([self contentLayoutRect]);
+            if (top > 0 && top < 200) w2sTop = top;
+        }
     }
 
     // Indicates if the window would be visible if the app were not hidden.
@@ -2059,8 +2124,8 @@ static inline BOOL stage_manager_enabled(void)
                 [self setFrameAndWineFrame:frame];
                 if ([self preventResizing])
                 {
-                    [self setContentMinSize:contentRect.size];
-                    [self setContentMaxSize:contentRect.size];
+                    [self setContentMinSize:[self w2sOuterSizeForWineSize:contentRect.size]];
+                    [self setContentMaxSize:[self w2sOuterSizeForWineSize:contentRect.size]];
                 }
 
                 if (needEnableScreenUpdates)
@@ -2114,8 +2179,8 @@ static inline BOOL stage_manager_enabled(void)
 
     - (BOOL) needsTransparency
     {
-        WineContentView *view = self.contentView;
-        return self.contentView.layer.mask || [view hasShapeImage] || self.usePerPixelAlpha ||
+        WineContentView *view = (WineContentView*)[self wineContentView];
+        return [self wineContentView].layer.mask || [view hasShapeImage] || self.usePerPixelAlpha ||
                 (gl_surface_mode == GL_SURFACE_BEHIND && [view hasGLDescendant]);
     }
 
@@ -2124,14 +2189,14 @@ static inline BOOL stage_manager_enabled(void)
         if (![self isOpaque] && !self.needsTransparency)
         {
             self.shapeChangedSinceLastDraw = TRUE;
-            [[self contentView] setNeedsDisplay:YES];
+            [[self wineContentView] setNeedsDisplay:YES];
             [self setBackgroundColor:[NSColor windowBackgroundColor]];
             [self setOpaque:YES];
         }
         else if ([self isOpaque] && self.needsTransparency)
         {
             self.shapeChangedSinceLastDraw = TRUE;
-            [[self contentView] setNeedsDisplay:YES];
+            [[self wineContentView] setNeedsDisplay:YES];
             [self setBackgroundColor:[NSColor clearColor]];
             [self setOpaque:NO];
         }
@@ -2139,7 +2204,7 @@ static inline BOOL stage_manager_enabled(void)
 
     - (void) setShape:(CGPathRef)newShape
     {
-        CALayer* layer = [[self contentView] layer];
+        CALayer* layer = [[self wineContentView] layer];
         CAShapeLayer* mask = (CAShapeLayer*)layer.mask;
         if (CGPathEqualToPath(newShape, mask.path)) return;
 
@@ -2149,9 +2214,9 @@ static inline BOOL stage_manager_enabled(void)
             layer.mask = mask = nil;
 
         if (mask.path)
-            [[self contentView] setNeedsDisplayInRect:NSRectFromCGRect(CGPathGetBoundingBox(mask.path))];
+            [[self wineContentView] setNeedsDisplayInRect:NSRectFromCGRect(CGPathGetBoundingBox(mask.path))];
         if (newShape)
-            [[self contentView] setNeedsDisplayInRect:NSRectFromCGRect(CGPathGetBoundingBox(newShape))];
+            [[self wineContentView] setNeedsDisplayInRect:NSRectFromCGRect(CGPathGetBoundingBox(newShape))];
 
         mask.path = newShape;
         self.shapeChangedSinceLastDraw = TRUE;
@@ -2217,8 +2282,8 @@ static inline BOOL stage_manager_enabled(void)
         savedContentMaxSize = maxSize;
         if (![self preventResizing])
         {
-            [self setContentMinSize:minSize];
-            [self setContentMaxSize:maxSize];
+            [self setContentMinSize:[self w2sOuterSizeForWineSize:minSize]];
+            [self setContentMaxSize:[self w2sOuterSizeForWineSize:maxSize]];
         }
     }
 
@@ -2252,7 +2317,10 @@ static inline BOOL stage_manager_enabled(void)
             style |= NSWindowStyleMaskFullScreen;
         else
             style &= ~NSWindowStyleMaskFullScreen;
-        frame = [[self class] contentRectForFrameRect:frame styleMask:style];
+        if (w2sSplit && !isFullscreen)
+            frame = [self contentRectForFrameRect:frame];
+        else
+            frame = [[self class] contentRectForFrameRect:frame styleMask:style];
         [[WineApplicationController sharedController] flipRect:&frame];
 
         /* Coalesce events by discarding any previous ones still in the queue. */
@@ -2291,7 +2359,7 @@ static inline BOOL stage_manager_enabled(void)
 
     - (BOOL) isEmptyShaped
     {
-        CAShapeLayer* mask = (CAShapeLayer*)[[self contentView] layer].mask;
+        CAShapeLayer* mask = (CAShapeLayer*)[[self wineContentView] layer].mask;
         return ([mask isEmptyShaped]);
     }
 
@@ -2749,9 +2817,9 @@ static inline BOOL stage_manager_enabled(void)
 
         [transform scaleBy:scale];
 
-        [[self contentView] layer].mask.contentsScale = mode ? 2.0 : 1.0;
+        [[self wineContentView] layer].mask.contentsScale = mode ? 2.0 : 1.0;
 
-        for (WineBaseView* subview in [self.contentView subviews])
+        for (WineBaseView* subview in [[self wineContentView] subviews])
         {
             if ([subview isKindOfClass:[WineBaseView class]])
                 [subview setRetinaMode:mode];
@@ -2798,10 +2866,10 @@ static inline BOOL stage_manager_enabled(void)
             return;
 
         CAShapeLayer *shapeLayer = [CAShapeLayer layer];
-        shapeLayer.bounds = self.contentView.layer.bounds;
-        shapeLayer.position = self.contentView.layer.position;
-        shapeLayer.geometryFlipped = self.contentView.layer.geometryFlipped;
-        shapeLayer.anchorPoint = self.contentView.layer.anchorPoint;
+        shapeLayer.bounds = [self wineContentView].layer.bounds;
+        shapeLayer.position = [self wineContentView].layer.position;
+        shapeLayer.geometryFlipped = [self wineContentView].layer.geometryFlipped;
+        shapeLayer.anchorPoint = [self wineContentView].layer.anchorPoint;
         shapeLayer.fillColor = CGColorGetConstantColor(kCGColorBlack);
 
         CGMutablePathRef path = CGPathCreateMutable();
@@ -2826,7 +2894,7 @@ static inline BOOL stage_manager_enabled(void)
         shapeLayer.path = path;
         CGPathRelease(path);
 
-        [self.contentView.layer addSublayer:shapeLayer];
+        [[self wineContentView].layer addSublayer:shapeLayer];
         self.contentViewMaskLayer = shapeLayer;
     }
 
@@ -3087,8 +3155,8 @@ static inline BOOL stage_manager_enabled(void)
         if ([self preventResizing])
         {
             NSRect contentRect = [self contentRectForFrameRect:frame];
-            [self setContentMinSize:contentRect.size];
-            [self setContentMaxSize:contentRect.size];
+            [self setContentMinSize:[self w2sOuterSizeForWineSize:contentRect.size]];
+            [self setContentMaxSize:[self w2sOuterSizeForWineSize:contentRect.size]];
         }
 
         [self postWindowFrameChanged:frame
@@ -3096,7 +3164,7 @@ static inline BOOL stage_manager_enabled(void)
                             resizing:[self inLiveResize]
                         skipSizeMove:skipSizeMove];
 
-        [[[self contentView] inputContext] invalidateCharacterCoordinates];
+        [[[self wineContentView] inputContext] invalidateCharacterCoordinates];
         [self updateFullscreen];
     }
 
@@ -3331,7 +3399,7 @@ static inline BOOL stage_manager_enabled(void)
     - (NSDragOperation) draggingUpdated:(id <NSDraggingInfo>)sender
     {
         NSDragOperation ret;
-        NSPoint pt = [[self contentView] convertPoint:[sender draggingLocation] fromView:nil];
+        NSPoint pt = [[self wineContentView] convertPoint:[sender draggingLocation] fromView:nil];
         CGPoint cgpt = cgpoint_win_from_mac(NSPointToCGPoint(pt));
 
         macdrv_query* query = macdrv_create_query();
@@ -3351,7 +3419,7 @@ static inline BOOL stage_manager_enabled(void)
     - (BOOL) performDragOperation:(id <NSDraggingInfo>)sender
     {
         BOOL ret;
-        NSPoint pt = [[self contentView] convertPoint:[sender draggingLocation] fromView:nil];
+        NSPoint pt = [[self wineContentView] convertPoint:[sender draggingLocation] fromView:nil];
         CGPoint cgpt = cgpoint_win_from_mac(NSPointToCGPoint(pt));
 
         macdrv_query* query = macdrv_create_query();
@@ -3565,7 +3633,7 @@ void macdrv_window_set_color_image(WineWindow *window, CGImageRef image, CGRect 
     CGImageRetain(image);
 
     OnMainThreadAsync(^{
-        WineContentView *view = [window contentView];
+        WineContentView *view = (WineContentView*)[window wineContentView];
 
         [view setColorImage:image];
         [view setSurfaceRect:cgrect_mac_from_win(rect)];
@@ -3587,7 +3655,7 @@ void macdrv_window_set_shape_image(WineWindow *window, CGImageRef image)
     CGImageRetain(image);
 
     OnMainThreadAsync(^{
-        WineContentView *view = [window contentView];
+        WineContentView *view = (WineContentView*)[window wineContentView];
 
         [view setShapeImage:image];
         [view setNeedsDisplay:true];
@@ -3809,7 +3877,7 @@ void macdrv_set_view_superview(WineContentView *view, WineContentView *parent, W
         WineContentView* superview = parent;
 
         if (!superview)
-            superview = [window contentView];
+            superview = (WineContentView*)[window wineContentView];
 
         if (superview == [view superview])
         {
@@ -4117,7 +4185,7 @@ void macdrv_window_create_ca_layer_host_view(WineWindow *window, unsigned int co
 @autoreleasepool
 {
     OnMainThread(^{
-        NSView* content_view = [window contentView];
+        NSView* content_view = [window wineContentView];
 
         if ([content_view isKindOfClass:[WineContentView class]])
             [(WineContentView*)content_view addCALayerHostViewWithContextId:context_id];
@@ -4130,7 +4198,7 @@ void macdrv_window_release_ca_layer_host_view(WineWindow *window, unsigned int c
 @autoreleasepool
 {
     OnMainThread(^{
-        NSView* content_view = [window contentView];
+        NSView* content_view = [window wineContentView];
 
         if ([content_view isKindOfClass:[WineContentView class]])
             [(WineContentView*)content_view removeCALayerHostView:context_id];
@@ -4251,7 +4319,7 @@ bool macdrv_send_keydown_to_input_source(int keyc, unsigned int flags, int repea
             CFRelease(c);
 
             window.commandDone = FALSE;
-            ret = [[[window contentView] inputContext] handleEvent:event] && !window.commandDone;
+            ret = [[[window wineContentView] inputContext] handleEvent:event] && !window.commandDone;
         }
         else
             ret = false;
@@ -4271,7 +4339,7 @@ void macdrv_clear_ime_text(void)
                 window = [[WineApplicationController sharedController] frontWineWindow];
         }
         if (window)
-            [[window contentView] clearMarkedText];
+            [[window wineContentView] clearMarkedText];
     });
 }
 
@@ -4279,7 +4347,7 @@ void macdrv_clear_ime_text(void)
  *              mnc_d3dmetal_content_view_from_cocoa_window
  *
  * MNC HACK 9 helper (Cocoa-side): given a macdrv_window cast back to a
- * WineWindow, fetch its contentView. Called from window.c after it has
+ * WineWindow, fetch the view wine draws in (wineContentView). Called from window.c after it has
  * already resolved the HWND->WineWindow mapping with the lock dropped.
  * Runs the AppKit access on the Cocoa main thread.
  */
@@ -4291,7 +4359,7 @@ macdrv_view mnc_d3dmetal_content_view_from_cocoa_window(macdrv_window w)
     if (!win) return NULL;
     __block NSView *content = nil;
     OnMainThread(^{
-        content = [win contentView];
+        content = [win wineContentView];
     });
     return (macdrv_view)content;
 }
