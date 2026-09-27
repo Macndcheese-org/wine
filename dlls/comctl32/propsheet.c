@@ -518,7 +518,7 @@ static void HPSP_set_header_title(HPROPSHEETPAGE hpsp, const WCHAR *title)
 {
     if (hpsp->unicode)
     {
-        if (!IS_INTRESOURCE(hpsp->pspW.pszHeaderTitle))
+        if ((hpsp->pspW.dwFlags & PSP_USEHEADERTITLE) && !IS_INTRESOURCE(hpsp->pspW.pszHeaderTitle))
             Free((void *)hpsp->pspW.pszHeaderTitle);
 
         hpsp->pspW.pszHeaderTitle = heap_strdupW(title);
@@ -526,7 +526,7 @@ static void HPSP_set_header_title(HPROPSHEETPAGE hpsp, const WCHAR *title)
     }
     else
     {
-        if (!IS_INTRESOURCE(hpsp->pspA.pszHeaderTitle))
+        if ((hpsp->pspA.dwFlags & PSP_USEHEADERTITLE) && !IS_INTRESOURCE(hpsp->pspA.pszHeaderTitle))
             Free((void *)hpsp->pspA.pszHeaderTitle);
 
         hpsp->pspA.pszHeaderTitle = heap_strdupWtoA(title);
@@ -538,18 +538,18 @@ static void HPSP_set_header_subtitle(HPROPSHEETPAGE hpsp, const WCHAR *subtitle)
 {
     if (hpsp->unicode)
     {
-        if (!IS_INTRESOURCE(hpsp->pspW.pszHeaderTitle))
-            Free((void *)hpsp->pspW.pszHeaderTitle);
+        if ((hpsp->pspW.dwFlags & PSP_USEHEADERSUBTITLE) && !IS_INTRESOURCE(hpsp->pspW.pszHeaderSubTitle))
+            Free((void *)hpsp->pspW.pszHeaderSubTitle);
 
-        hpsp->pspW.pszHeaderTitle = heap_strdupW(subtitle);
+        hpsp->pspW.pszHeaderSubTitle = heap_strdupW(subtitle);
         hpsp->pspW.dwFlags |= PSP_USEHEADERSUBTITLE;
     }
     else
     {
-        if (!IS_INTRESOURCE(hpsp->pspA.pszHeaderTitle))
-            Free((void *)hpsp->pspA.pszHeaderTitle);
+        if ((hpsp->pspA.dwFlags & PSP_USEHEADERSUBTITLE) && !IS_INTRESOURCE(hpsp->pspA.pszHeaderSubTitle))
+            Free((void *)hpsp->pspA.pszHeaderSubTitle);
 
-        hpsp->pspA.pszHeaderTitle = heap_strdupWtoA(subtitle);
+        hpsp->pspA.pszHeaderSubTitle = heap_strdupWtoA(subtitle);
         hpsp->pspA.dwFlags |= PSP_USEHEADERSUBTITLE;
     }
 }
