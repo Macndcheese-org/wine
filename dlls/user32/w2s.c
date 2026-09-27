@@ -6,9 +6,10 @@
  * SwiftUI views, and MessageBox is offered to it before wine's own dialog.
  * With the switch off, or without the DLL, nothing here does anything.
  *
- * The switch: WINE_MNC_NATIVE_UI=1 in the environment, or
- * HKCU\Software\Wine\Mac Driver\NativeUI = "y", overridable per program under
- * HKCU\Software\Wine\AppDefaults\<program.exe>\Mac Driver.
+ * The switch is on by default. Turn it off with WINE_MNC_NATIVE_UI=0 in the
+ * environment, or HKCU\Software\Wine\Mac Driver\NativeUI = "n", overridable per
+ * program under HKCU\Software\Wine\AppDefaults\<program.exe>\Mac Driver.
+ * Wine's own background processes stay off unless a setting names them.
  */
 
 #include <stdarg.h>
@@ -42,9 +43,25 @@ static int registry_switch( HKEY root, const WCHAR *path )
     return bool_value( value );
 }
 
+/* Wine's services and the helper processes of Chromium-based apps (Steam's
+ * steamwebhelper renderers, Electron) have no controls worth translating, and
+ * loading SwiftUI into each of them would cost memory for nothing. */
+static BOOL background_process( const WCHAR *exe )
+{
+    static const WCHAR *names[] =
+    {
+        L"conhost.exe", L"explorer.exe", L"plugplay.exe", L"rpcss.exe", L"services.exe",
+        L"start.exe", L"svchost.exe", L"wineboot.exe", L"winedevice.exe",
+    };
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(names); i++) if (!wcsicmp( exe, names[i] )) return TRUE;
+    return wcsstr( GetCommandLineW(), L" --type=" ) != NULL;
+}
+
 static BOOL w2s_enabled(void)
 {
-    WCHAR value[8], module[MAX_PATH], path[MAX_PATH + 64], *exe;
+    WCHAR value[8], module[MAX_PATH], path[MAX_PATH + 64], *exe = NULL;
     int on;
 
     if (GetEnvironmentVariableW( L"WINE_MNC_NATIVE_UI", value, ARRAY_SIZE(value) ) &&
@@ -53,13 +70,15 @@ static BOOL w2s_enabled(void)
 
     if (GetModuleFileNameW( NULL, module, MAX_PATH ) && (exe = wcsrchr( module, '\\' )))
     {
+        exe++;
         wcscpy( path, L"Software\\Wine\\AppDefaults\\" );
-        wcscat( path, exe + 1 );
+        wcscat( path, exe );
         wcscat( path, L"\\Mac Driver" );
         if ((on = registry_switch( HKEY_CURRENT_USER, path )) != -1) return on;
     }
 
-    return registry_switch( HKEY_CURRENT_USER, L"Software\\Wine\\Mac Driver" ) == 1;
+    if (exe && background_process( exe )) return FALSE;
+    return registry_switch( HKEY_CURRENT_USER, L"Software\\Wine\\Mac Driver" ) != 0;
 }
 
 static BOOL CALLBACK w2s_init( INIT_ONCE *once, void *param, void **context )
