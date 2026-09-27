@@ -2221,6 +2221,18 @@ static void calc_menu_bar_size( HDC hdc, RECT *rect, struct menu *menu, HWND own
     }
 }
 
+/* MNC Win32-to-SwiftUI: win32swiftui.dll shows this window's menu in the Mac
+ * menu bar and sets this property; the window then has no menu bar of its own
+ * (no height, no painting, no hit test, no keyboard tracking), so the space
+ * goes to the client area. */
+BOOL has_native_menu_bar( HWND hwnd )
+{
+    /* a WCHAR array: L"" strings are 32-bit on this (unix) side */
+    static const WCHAR native_menu_barW[] = {'_','_','w','i','n','e','_','n','a','t','i','v','e','_',
+                                             'm','e','n','u','_','b','a','r',0};
+    return NtUserGetProp( hwnd, native_menu_barW ) != 0;
+}
+
 UINT get_menu_bar_height( HWND hwnd, UINT width, INT org_x, INT org_y )
 {
     struct menu *menu;
@@ -2228,6 +2240,8 @@ UINT get_menu_bar_height( HWND hwnd, UINT width, INT org_x, INT org_y )
     HDC hdc;
 
     TRACE( "hwnd %p, width %d, at (%d, %d).\n", hwnd, width, org_x, org_y );
+
+    if (has_native_menu_bar( hwnd )) return 0;
 
     if (!(menu = unsafe_menu_ptr( get_menu( hwnd )))) return 0;
 
@@ -4455,6 +4469,9 @@ void track_keyboard_menu_bar( HWND hwnd, UINT wparam, WCHAR ch )
     /* find window that has a menu */
     while (is_win_menu_disallowed( hwnd ))
         if (!(hwnd = NtUserGetAncestor( hwnd, GA_PARENT ))) return;
+
+    /* MNC Win32-to-SwiftUI: the menu is in the Mac menu bar, reached with the mouse or Cmd */
+    if (has_native_menu_bar( hwnd )) return;
 
     /* check if we have to track a system menu */
     menu = get_menu( hwnd );

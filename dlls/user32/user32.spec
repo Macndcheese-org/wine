@@ -1160,7 +1160,7 @@
 @ stdcall ToUnicodeEx(long long ptr ptr long long long) NtUserToUnicodeEx
 @ stdcall TrackMouseEvent(ptr) NtUserTrackMouseEvent
 @ stdcall TrackPopupMenu(long long long long long long ptr)
-@ stdcall TrackPopupMenuEx(long long long long long ptr) NtUserTrackPopupMenuEx
+@ stdcall TrackPopupMenuEx(long long long long long ptr)
 @ stdcall TranslateAccelerator(long long ptr) TranslateAcceleratorA
 @ stdcall TranslateAcceleratorA(long long ptr)
 @ stdcall TranslateAcceleratorW(long long ptr) NtUserTranslateAccelerator

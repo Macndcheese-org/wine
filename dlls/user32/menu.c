@@ -180,7 +180,19 @@ static LPCSTR MENUEX_ParseResource( LPCSTR res, HMENU hMenu)
 BOOL WINAPI TrackPopupMenu( HMENU hMenu, UINT wFlags, INT x, INT y,
                             INT nReserved, HWND hWnd, const RECT *lpRect )
 {
-    return NtUserTrackPopupMenuEx( hMenu, wFlags, x, y, hWnd, NULL );
+    return TrackPopupMenuEx( hMenu, wFlags, x, y, hWnd, NULL );
+}
+
+/**********************************************************************
+ *         TrackPopupMenuEx   (USER32.@)
+ */
+BOOL WINAPI TrackPopupMenuEx( HMENU menu, UINT flags, INT x, INT y, HWND hwnd, TPMPARAMS *params )
+{
+    INT ret;
+
+    /* MNC Win32-to-SwiftUI: a native NSMenu when the native UI is on */
+    if (w2s_track_popup_menu( menu, flags, x, y, hwnd, params, &ret )) return ret;
+    return NtUserTrackPopupMenuEx( menu, flags, x, y, hwnd, params );
 }
 
 /***********************************************************************
