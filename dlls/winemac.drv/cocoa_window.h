@@ -144,6 +144,9 @@
     WineEventQueue* queue;
     uint64_t hwnd;
     unsigned int message;
+    NSRect wineFrame;       /* the control's rectangle */
+    CGFloat outsetTop;      /* how far the native control reaches above it */
+    BOOL behind;            /* below the other native controls (a container) */
 }
 
 @property (readonly, nonatomic) uint64_t hwnd;
@@ -151,6 +154,12 @@
 
     - (instancetype) initWithQueue:(WineEventQueue*)inQueue hwnd:(uint64_t)inHwnd message:(unsigned int)inMessage;
     - (WineEventQueue*) queue;
+    /* for win32swiftui.so (performSelector:, main thread): a group box's title sits
+       above its rectangle, and the box stays behind the controls it contains */
+    - (void) w2sSetOutsetTop:(NSNumber*)top;
+    - (void) w2sSetBehind:(NSNumber*)flag;
+    - (BOOL) w2sBehind;
+    - (void) w2sApplyFrame:(NSRect)frame;
 
 @end
 
