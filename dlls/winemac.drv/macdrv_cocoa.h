@@ -128,6 +128,7 @@ DECLARE_CLASS(WineMetalView);
 DECLARE_CLASS(WineOpenGLContext);
 DECLARE_CLASS(WineStatusItem);
 DECLARE_CLASS(WineWindow);
+DECLARE_CLASS(WineW2SHostView);
 DECLARE_CLASS(CAMetalLayer);
 DECLARE_PROTO(MTLDevice);
 DECLARE_PROTO(WineMetalSwapChain);
@@ -341,6 +342,7 @@ enum {
     WINDOW_MINIMIZE_REQUESTED,
     WINDOW_RESIZE_ENDED,
     WINDOW_RESTORE_REQUESTED,
+    W2S_WAKE, /* MNC Win32-to-SwiftUI */
     NUM_EVENT_TYPES
 };
 
@@ -450,6 +452,12 @@ typedef struct macdrv_event {
             bool    keep_frame;
             CGRect  frame;
         }                                           window_restore_requested;
+        /* MNC Win32-to-SwiftUI */
+        struct {
+            uint64_t        hwnd;
+            unsigned int    message;
+            uint64_t        cookie;
+        }                                           w2s_wake;
     };
 } macdrv_event;
 
@@ -578,6 +586,12 @@ extern id_WineMetalSwapChain macdrv_create_view_swapchain(WineContentView *view)
 extern id_WineMetalSwapChain macdrv_create_offscreen_swapchain(void* hwnd, CGRect bounds);
 extern CAMetalLayer *macdrv_swapchain_get_layer(id_WineMetalSwapChain swapchain);
 extern void macdrv_destroy_swapchain(id_WineMetalSwapChain swapchain);
+
+/* MNC Win32-to-SwiftUI host views (mnc_w2s.m) */
+extern WineW2SHostView *macdrv_w2s_create_host(WineEventQueue *queue, uint64_t hwnd, unsigned int message);
+extern void macdrv_w2s_dispose_host(WineW2SHostView *view);
+extern void macdrv_w2s_set_host_geometry(WineW2SHostView *view, WineWindow *window, CGRect rect, bool hidden);
+extern void macdrv_w2s_post_wake(WineW2SHostView *view, uint64_t cookie);
 extern void macdrv_window_create_ca_layer_host_view(WineWindow *window, unsigned int context_id);
 extern void macdrv_window_release_ca_layer_host_view(WineWindow *window, unsigned int context_id);
 extern void macdrv_create_remote_layer(void* hwnd, unsigned int context_id);

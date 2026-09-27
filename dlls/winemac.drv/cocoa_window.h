@@ -110,3 +110,24 @@
     - (void) setRetinaMode:(BOOL)mode;
 
 @end
+
+
+/* MNC Win32-to-SwiftUI: holds the native control of one translated Win32 control (mnc_w2s.m). */
+@interface WineW2SHostView : NSView
+{
+    WineEventQueue* queue;
+    uint64_t hwnd;
+    unsigned int message;
+}
+
+@property (readonly, nonatomic) uint64_t hwnd;
+@property (readonly, nonatomic) unsigned int message;
+
+    - (instancetype) initWithQueue:(WineEventQueue*)inQueue hwnd:(uint64_t)inHwnd message:(unsigned int)inMessage;
+    - (WineEventQueue*) queue;
+
+@end
+
+extern WineW2SHostView *macdrv_w2s_host_for_view(NSView *view);
+extern BOOL macdrv_w2s_event_in_host(NSEvent *event);
+extern BOOL macdrv_w2s_key_goes_to_wine(NSEvent *event, NSResponder *responder);

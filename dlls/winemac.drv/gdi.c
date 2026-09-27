@@ -260,6 +260,8 @@ static INT macdrv_ExtEscape(PHYSDEV dev, INT escape, INT in_count, LPCVOID in_da
             {
             case MACDRV_ESCAPE_GET_SURFACE:
             case MACDRV_ESCAPE_RELEASE_SURFACE:
+            case MACDRV_ESCAPE_W2S_GET_HOST:
+            case MACDRV_ESCAPE_W2S_RELEASE_HOST:
                 return TRUE;
             }
         }
@@ -316,6 +318,44 @@ static INT macdrv_ExtEscape(PHYSDEV dev, INT escape, INT in_count, LPCVOID in_da
             use_window_client_surface(&surface->client, FALSE);
             client_surface_release(&surface->client);
         }
+        return TRUE;
+    }
+    /* MNC Win32-to-SwiftUI: a host view over a translated control. */
+    case MACDRV_ESCAPE_W2S_GET_HOST:
+    {
+        const struct macdrv_escape_w2s_host_request *request = in_data;
+        struct macdrv_escape_w2s_host *data = out_data;
+        HWND hwnd = NtUserWindowFromDC(dev->hdc);
+        struct client_surface *client;
+        struct macdrv_win_data *win_data;
+        void *view;
+
+        if (!request || in_count < sizeof(*request) || out_count < sizeof(*data)) return FALSE;
+        if (request->version != MACDRV_W2S_VERSION || !hwnd) return FALSE;
+        if (!(client = macdrv_w2s_create_host_surface(hwnd, request->message, &view))) return FALSE;
+
+        data->surface = (UINT_PTR)client;
+        data->view = (UINT_PTR)view;
+        data->window = 0;
+        if ((win_data = get_win_data(NtUserGetAncestor(hwnd, GA_ROOT))))
+        {
+            data->window = (UINT_PTR)win_data->cocoa_window;
+            release_win_data(win_data);
+        }
+        data->post_wake = (UINT_PTR)macdrv_w2s_post_wake;
+        return TRUE;
+    }
+    case MACDRV_ESCAPE_W2S_RELEASE_HOST:
+    {
+        const struct macdrv_escape_w2s_host *data = in_data;
+        struct client_surface *client;
+
+        if (!data || in_count < sizeof(*data)) return FALSE;
+        client = (struct client_surface *)(UINT_PTR)data->surface;
+        if (!macdrv_is_w2s_host_surface(client)) return FALSE;
+        /* release drops the only reference: detach removes it from the list
+         * and disposes the view */
+        client_surface_release(client);
         return TRUE;
     }
     }

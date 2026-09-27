@@ -356,6 +356,8 @@ enum macdrv_escape_codes
 {
     MACDRV_ESCAPE_GET_SURFACE = 6790,
     MACDRV_ESCAPE_RELEASE_SURFACE,
+    MACDRV_ESCAPE_W2S_GET_HOST,     /* MNC Win32-to-SwiftUI */
+    MACDRV_ESCAPE_W2S_RELEASE_HOST,
 };
 
 struct macdrv_escape_surface
@@ -363,5 +365,26 @@ struct macdrv_escape_surface
     UINT64 surface;
     UINT64 layer;
 };
+
+/* MNC Win32-to-SwiftUI: win32swiftui.dll asks for a host view over a control.
+ * The layouts are copied in win32swiftui's w2s_protocol.h; keep them in sync. */
+struct macdrv_escape_w2s_host_request
+{
+    UINT32 message;     /* posted to the control when the native side has events */
+    UINT32 version;
+};
+
+struct macdrv_escape_w2s_host
+{
+    UINT64 surface;     /* pass back to MACDRV_ESCAPE_W2S_RELEASE_HOST */
+    UINT64 view;        /* NSView to put the native control in */
+    UINT64 window;      /* the top-level NSWindow, for sheets */
+    UINT64 post_wake;   /* void (*)(void *view, UINT64 cookie), thread-safe */
+};
+
+#define MACDRV_W2S_VERSION 1
+
+extern struct client_surface *macdrv_w2s_create_host_surface(HWND hwnd, UINT message, void **view);
+extern BOOL macdrv_is_w2s_host_surface(struct client_surface *client);
 
 #endif  /* __WINE_MACDRV_H */

@@ -2528,7 +2528,15 @@ static inline BOOL stage_manager_enabled(void)
            views.  We want to bypass that feature, so directly route key-down
            events to -keyDown:. */
         if (type == NSEventTypeKeyDown)
-            [[self firstResponder] keyDown:event];
+        {
+            NSResponder* responder = [self firstResponder];
+
+            /* MNC Win32-to-SwiftUI: Tab/Escape/Return drive the Win32 dialog. */
+            if (macdrv_w2s_key_goes_to_wine(event, responder))
+                [self keyDown:event];
+            else
+                [responder keyDown:event];
+        }
         else
         {
             if (!draggingPhase && maximized && ![self isMovable] &&

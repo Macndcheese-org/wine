@@ -77,6 +77,7 @@ static const char *dbgstr_event(int type)
         "WINDOW_MINIMIZE_REQUESTED",
         "WINDOW_RESIZE_ENDED",
         "WINDOW_RESTORE_REQUESTED",
+        "W2S_WAKE",
     };
     C_ASSERT(ARRAYSIZE(event_names) == NUM_EVENT_TYPES);
 
@@ -133,6 +134,7 @@ static macdrv_event_mask get_event_mask(DWORD mask)
         event_mask |= event_mask_for_type(WINDOW_FRAME_CHANGED);
         event_mask |= event_mask_for_type(WINDOW_GOT_FOCUS);
         event_mask |= event_mask_for_type(WINDOW_LOST_FOCUS);
+        event_mask |= event_mask_for_type(W2S_WAKE);
     }
 
     if (mask & QS_SENDMESSAGE)
@@ -488,6 +490,10 @@ void macdrv_handle_event(const macdrv_event *event)
         break;
     case WINDOW_RESTORE_REQUESTED:
         macdrv_window_restore_requested(hwnd, event);
+        break;
+    case W2S_WAKE: /* MNC Win32-to-SwiftUI: native control has events for the Win32 side */
+        NtUserPostMessage((HWND)(UINT_PTR)event->w2s_wake.hwnd, event->w2s_wake.message,
+                          (WPARAM)event->w2s_wake.cookie, 0);
         break;
     default:
         TRACE("    ignoring\n");

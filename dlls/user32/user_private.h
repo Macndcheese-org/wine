@@ -188,4 +188,8 @@ static inline void mirror_rect( const RECT *window_rect, RECT *rect )
     rect->right = width - tmp;
 }
 
+/* w2s.c: MNC Win32-to-SwiftUI */
+extern void w2s_window_created( HWND hwnd );
+extern BOOL w2s_message_box( const MSGBOXPARAMSW *params, INT *ret );
+
 #endif /* __WINE_USER_PRIVATE_H */

@@ -36,6 +36,7 @@ SOURCES = \
 	keyboard.c \
 	macdrv_main.c \
 	mnc_metal_layer.m \
+	mnc_w2s.m \
 	mouse.c \
 	opengl.c \
 	surface.c \

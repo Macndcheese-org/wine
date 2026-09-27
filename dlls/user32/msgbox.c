@@ -618,6 +618,9 @@ INT WINAPI MessageBoxIndirectW( LPMSGBOXPARAMSW msgbox )
     UINT i;
     struct ThreadWindows threadWindows;
 
+    /* MNC Win32-to-SwiftUI: a native alert when the native UI is on */
+    if (w2s_message_box( msgbox, &ret )) return ret;
+
     if (!(hRes = FindResourceExW(user32_module, (LPWSTR)RT_DIALOG, L"MSGBOX", msgbox->dwLanguageId)))
     {
         if (!msgbox->dwLanguageId ||

@@ -1205,6 +1205,90 @@ struct client_surface *macdrv_CreateClientSurface(HWND hwnd, int pixel_format, B
     return &surface->client;
 }
 
+/* MNC Win32-to-SwiftUI: a client surface that only keeps a host view over a
+ * translated control. win32u's update_client_surfaces() calls update on every
+ * move, resize, show and hide in the control's top-level window, which is all
+ * the tracking the host needs. The format is never a pixel format, so the GL
+ * and Vulkan paths never pick it up from the unused list. */
+#define W2S_HOST_FORMAT 0x77327300
+
+struct macdrv_w2s_host
+{
+    struct client_surface   client;
+    WineW2SHostView        *view;
+};
+
+static struct macdrv_w2s_host *w2s_host_from_client(struct client_surface *client)
+{
+    return CONTAINING_RECORD(client, struct macdrv_w2s_host, client);
+}
+
+static void w2s_host_destroy(struct client_surface *client)
+{
+    TRACE("%s\n", debugstr_client_surface(client));
+}
+
+static void w2s_host_detach(struct client_surface *client)
+{
+    struct macdrv_w2s_host *host = w2s_host_from_client(client);
+
+    TRACE("%s\n", debugstr_client_surface(client));
+
+    if (host->view) macdrv_w2s_dispose_host(host->view);
+    host->view = NULL;
+}
+
+static void w2s_host_update(struct client_surface *client)
+{
+    struct macdrv_w2s_host *host = w2s_host_from_client(client);
+    struct macdrv_win_data *data;
+    BOOL hidden;
+
+    if (!host->view) return;
+    hidden = !NtUserIsWindowVisible(client->hwnd);
+    if (!(data = get_win_data(client->toplevel))) return;
+    macdrv_w2s_set_host_geometry(host->view, data->cocoa_window, cgrect_from_rect(client->monitor_rect), hidden);
+    release_win_data(data);
+}
+
+static void w2s_host_present(struct client_surface *client, HDC hdc)
+{
+}
+
+static void w2s_host_unused(struct client_surface *client)
+{
+    w2s_host_detach(client);
+}
+
+static const struct client_surface_funcs w2s_host_funcs =
+{
+    .size = sizeof(struct macdrv_w2s_host),
+    .destroy = w2s_host_destroy,
+    .detach = w2s_host_detach,
+    .update = w2s_host_update,
+    .present = w2s_host_present,
+    .unused = w2s_host_unused,
+};
+
+BOOL macdrv_is_w2s_host_surface(struct client_surface *client)
+{
+    return client && client->funcs == &w2s_host_funcs;
+}
+
+struct client_surface *macdrv_w2s_create_host_surface(HWND hwnd, UINT message, void **view)
+{
+    struct macdrv_thread_data *thread_data = macdrv_init_thread_data();
+    struct macdrv_w2s_host *host;
+
+    if (!(host = client_surface_create(&w2s_host_funcs, hwnd, W2S_HOST_FORMAT, FALSE))) return NULL;
+    host->view = macdrv_w2s_create_host(thread_data->queue, (UINT_PTR)hwnd, message);
+    use_window_client_surface(&host->client, TRUE);
+
+    TRACE("%p -> %s view %p\n", hwnd, debugstr_client_surface(&host->client), host->view);
+    *view = host->view;
+    return &host->client;
+}
+
 BOOL macdrv_client_surface_acquire_metal_swapchain(struct macdrv_client_surface *surface)
 {
     HWND hwnd = surface->client.hwnd;
