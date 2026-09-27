@@ -45,6 +45,12 @@ static HBRUSH get_dialog_background_brush(HWND hwnd, BOOL create)
     if (!IsThemeActive())
         return NULL;
 
+    /* MNC Win32-to-SwiftUI: with the native UI, tab pages sit on the window's
+     * background as on macOS, which has no textured tab body: that texture
+     * stays light when the system colours follow Dark Mode. */
+    if (GetModuleHandleW(L"win32swiftui.dll"))
+        return NULL;
+
     flag = HandleToUlong(GetPropW(hwnd, (LPCWSTR)MAKEINTATOM(atDialogThemeEnabled)));
     if (flag != ETDT_ENABLETAB && flag != ETDT_ENABLEAEROWIZARDTAB)
         return NULL;
