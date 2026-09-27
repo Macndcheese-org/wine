@@ -257,14 +257,18 @@ static CGFloat w2s_toolbar_height(NSWindow* window)
     return (top > 0 && top < 200) ? top : 52;
 }
 
-@interface WineWindow (W2SSidebar)
-- (void) w2sAttachSidebar:(NSViewController*)sidebar width:(CGFloat)width;
-- (void) w2sAttachSidebar:(NSViewController*)sidebar widthNumber:(NSNumber*)width;
-- (void) w2sDetachSidebar;
-- (void) w2sSidebarCollapsedChanged;
-- (BOOL) w2sSidebarCollapsed;
-- (void) w2sSetSidebarCollapsed:(NSNumber*)collapsed;
-@end
+/* The sidebar's content starts below the titlebar and toolbar it runs
+   under, as a NavigationSplitView's list does: AppKit doesn't always give a
+   full-height sidebar item that safe area, so add what's missing. */
+static void w2s_inset_sidebar(NSView* view, CGFloat top)
+{
+    NSEdgeInsets extra = view.additionalSafeAreaInsets;
+    CGFloat given = view.safeAreaInsets.top - extra.top;
+
+    extra.top = top > given ? top - given : 0;
+    view.additionalSafeAreaInsets = extra;
+}
+
 
 
 /* The split view's toolbar delegate: the system toggle and its separator
@@ -384,6 +388,8 @@ static CGFloat w2s_toolbar_height(NSWindow* window)
     [wineView release];
     [detailVC release];
 
+    w2s_inset_sidebar(sidebar.view, w2sTop);
+
     [side addObserver:w2sToolbarDelegate forKeyPath:@"collapsed" options:0 context:NULL];
 
     if (firstResponder == wineView && [wineView acceptsFirstResponder])
@@ -438,6 +444,12 @@ static CGFloat w2s_toolbar_height(NSWindow* window)
     content = [self contentRectForFrameRect:[self frame]];  /* with the OLD w2sLeading */
     w2sLeading = [w2sSidebarItem isCollapsed] ? 0 : w2sSidebarWidth;
     [self setFrameAndWineFrame:[self frameRectForContentRect:content]];
+}
+
+- (void) w2sUpdateSidebarInset
+{
+    if (w2sSplit)
+        w2s_inset_sidebar(w2sSidebarItem.viewController.view, w2sTop);
 }
 
 - (BOOL) w2sSidebarCollapsed

@@ -124,6 +124,19 @@
 
 @end
 
+/* MNC Win32-to-SwiftUI: the native sidebar (mnc_w2s.m) */
+@interface WineWindow (W2SSidebar)
+    - (void) w2sAttachSidebar:(NSViewController*)sidebar width:(CGFloat)width;
+    /* for the runtime, which calls through performSelector: (no CGFloat there) */
+    - (void) w2sAttachSidebar:(NSViewController*)sidebar widthNumber:(NSNumber*)width;
+    - (void) w2sDetachSidebar;
+    - (void) w2sSidebarCollapsedChanged;
+    - (BOOL) w2sSidebarCollapsed;
+    - (void) w2sSetSidebarCollapsed:(NSNumber*)collapsed;
+    /* after the titlebar changed */
+    - (void) w2sUpdateSidebarInset;
+@end
+
 
 /* MNC Win32-to-SwiftUI: holds the native control of one translated Win32 control (mnc_w2s.m). */
 @interface WineW2SHostView : NSView
