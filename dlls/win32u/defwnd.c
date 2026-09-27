@@ -68,7 +68,7 @@ static BOOL has_static_outer_frame( UINT ex_style )
 
 static BOOL has_menu( HWND hwnd, UINT style )
 {
-    return (style & (WS_CHILD | WS_POPUP)) != WS_CHILD && get_menu( hwnd );
+    return (style & (WS_CHILD | WS_POPUP)) != WS_CHILD && get_menu( hwnd ) && !has_native_menu_bar( hwnd );
 }
 
 void fill_rect( HDC dc, const RECT *rect, HBRUSH hbrush )

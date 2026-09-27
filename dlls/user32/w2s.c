@@ -25,6 +25,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(w2s);
 static INIT_ONCE w2s_once = INIT_ONCE_STATIC_INIT;
 static void (WINAPI *pW2SWindowCreated)( HWND hwnd );
 static BOOL (WINAPI *pW2SMessageBox)( const MSGBOXPARAMSW *params, INT *ret );
+static BOOL (WINAPI *pW2STrackPopupMenu)( HMENU menu, UINT flags, INT x, INT y, HWND hwnd, TPMPARAMS *params, INT *ret );
 
 static int bool_value( const WCHAR *value )
 {
@@ -73,6 +74,7 @@ static BOOL CALLBACK w2s_init( INIT_ONCE *once, void *param, void **context )
     }
     pW2SWindowCreated = (void *)GetProcAddress( module, "W2SWindowCreated" );
     pW2SMessageBox = (void *)GetProcAddress( module, "W2SMessageBox" );
+    pW2STrackPopupMenu = (void *)GetProcAddress( module, "W2STrackPopupMenu" );
     TRACE( "win32swiftui.dll loaded: %p %p\n", pW2SWindowCreated, pW2SMessageBox );
     return TRUE;
 }
@@ -87,4 +89,10 @@ BOOL w2s_message_box( const MSGBOXPARAMSW *params, INT *ret )
 {
     InitOnceExecuteOnce( &w2s_once, w2s_init, NULL, NULL );
     return pW2SMessageBox && pW2SMessageBox( params, ret );
+}
+
+BOOL w2s_track_popup_menu( HMENU menu, UINT flags, INT x, INT y, HWND hwnd, TPMPARAMS *params, INT *ret )
+{
+    InitOnceExecuteOnce( &w2s_once, w2s_init, NULL, NULL );
+    return pW2STrackPopupMenu && pW2STrackPopupMenu( menu, flags, x, y, hwnd, params, ret );
 }

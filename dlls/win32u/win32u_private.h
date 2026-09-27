@@ -120,6 +120,7 @@ extern NTSTATUS send_hardware_input( HWND hwnd, UINT flags, const INPUT *input, 
 extern UINT draw_nc_menu_bar( HDC hdc, RECT *rect, HWND hwnd );
 extern void end_menu( HWND hwnd );
 extern HMENU get_menu( HWND hwnd );
+extern BOOL has_native_menu_bar( HWND hwnd );
 extern UINT get_menu_bar_height( HWND hwnd, UINT width, INT org_x, INT org_y );
 extern BOOL get_menu_info( HMENU handle, MENUINFO *info );
 extern INT get_menu_item_count( HMENU handle );
