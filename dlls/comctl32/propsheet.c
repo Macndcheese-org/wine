@@ -518,7 +518,7 @@ static void HPSP_set_header_title(HPROPSHEETPAGE hpsp, const WCHAR *title)
 {
     if (hpsp->unicode)
     {
-        if (!IS_INTRESOURCE(hpsp->pspW.pszHeaderTitle))
+        if ((hpsp->pspW.dwFlags & PSP_USEHEADERTITLE) && !IS_INTRESOURCE(hpsp->pspW.pszHeaderTitle))
             Free((void *)hpsp->pspW.pszHeaderTitle);
 
         hpsp->pspW.pszHeaderTitle = heap_strdupW(title);
@@ -526,7 +526,7 @@ static void HPSP_set_header_title(HPROPSHEETPAGE hpsp, const WCHAR *title)
     }
     else
     {
-        if (!IS_INTRESOURCE(hpsp->pspA.pszHeaderTitle))
+        if ((hpsp->pspA.dwFlags & PSP_USEHEADERTITLE) && !IS_INTRESOURCE(hpsp->pspA.pszHeaderTitle))
             Free((void *)hpsp->pspA.pszHeaderTitle);
 
         hpsp->pspA.pszHeaderTitle = heap_strdupWtoA(title);
@@ -538,20 +538,38 @@ static void HPSP_set_header_subtitle(HPROPSHEETPAGE hpsp, const WCHAR *subtitle)
 {
     if (hpsp->unicode)
     {
-        if (!IS_INTRESOURCE(hpsp->pspW.pszHeaderTitle))
-            Free((void *)hpsp->pspW.pszHeaderTitle);
+        if ((hpsp->pspW.dwFlags & PSP_USEHEADERSUBTITLE) && !IS_INTRESOURCE(hpsp->pspW.pszHeaderSubTitle))
+            Free((void *)hpsp->pspW.pszHeaderSubTitle);
 
-        hpsp->pspW.pszHeaderTitle = heap_strdupW(subtitle);
+        hpsp->pspW.pszHeaderSubTitle = heap_strdupW(subtitle);
         hpsp->pspW.dwFlags |= PSP_USEHEADERSUBTITLE;
     }
     else
     {
-        if (!IS_INTRESOURCE(hpsp->pspA.pszHeaderTitle))
-            Free((void *)hpsp->pspA.pszHeaderTitle);
+        if ((hpsp->pspA.dwFlags & PSP_USEHEADERSUBTITLE) && !IS_INTRESOURCE(hpsp->pspA.pszHeaderSubTitle))
+            Free((void *)hpsp->pspA.pszHeaderSubTitle);
 
-        hpsp->pspA.pszHeaderTitle = heap_strdupWtoA(subtitle);
+        hpsp->pspA.pszHeaderSubTitle = heap_strdupWtoA(subtitle);
         hpsp->pspA.dwFlags |= PSP_USEHEADERSUBTITLE;
     }
+}
+
+static void HPSP_get_header_text(HPROPSHEETPAGE hpsp, BOOL title, WCHAR *buf, int size)
+{
+    const void *text;
+
+    if (hpsp->unicode)
+        text = title ? hpsp->pspW.pszHeaderTitle : hpsp->pspW.pszHeaderSubTitle;
+    else
+        text = title ? hpsp->pspA.pszHeaderTitle : hpsp->pspA.pszHeaderSubTitle;
+
+    buf[0] = 0;
+    if (IS_INTRESOURCE(text))
+        LoadStringW(hpsp->unicode ? hpsp->pspW.hInstance : hpsp->pspA.hInstance, (UINT_PTR)text, buf, size);
+    else if (hpsp->unicode)
+        lstrcpynW(buf, text, size);
+    else if (!MultiByteToWideChar(CP_ACP, 0, text, -1, buf, size))
+        buf[size - 1] = 0;
 }
 
 static void HPSP_draw_text(HPROPSHEETPAGE hpsp, HDC hdc, BOOL title, RECT *r, UINT format)
@@ -629,6 +647,64 @@ static VOID PROPSHEET_UnImplementedFlags(DWORD dwFlags)
 #undef add_flag
 
 /******************************************************************************
+ *            PROPSHEET_IsNativeWizard
+ *
+ * MNC Win32-to-SwiftUI: with the native UI on, win32swiftui.dll translates a
+ * wizard's tab control (hidden otherwise) into the macOS Installer layout: the
+ * page titles as steps in a sidebar, the page's header above the page. It
+ * marks the tab control with this property. The tab control then stays shown
+ * over the page area and wine lays the wizard out around its TCM_ADJUSTRECT,
+ * as it does for a tabbed sheet: the width of the steps comes from the native
+ * side, and no window moves behind wine's back. The tab control's text
+ * carries the active page's header ("title\nsubtitle") to the native view,
+ * which draws it instead of the Wizard97 header band.
+ */
+static BOOL PROPSHEET_IsNativeWizard(HWND hwndDlg, const PropSheetInfo *psInfo)
+{
+    return psInfo && (psInfo->ppshheader.dwFlags & INTRNL_ANY_WIZARD) &&
+           GetPropW(GetDlgItem(hwndDlg, IDC_TABCONTROL), L"__wine_native_wizard");
+}
+
+/* the page area of a native wizard, in dialog coordinates: the tab control
+ * less what its native view keeps for the steps */
+static void PROPSHEET_GetNativeWizardArea(HWND hwndDlg, RECT *rc)
+{
+    HWND hwndTabCtrl = GetDlgItem(hwndDlg, IDC_TABCONTROL);
+
+    GetClientRect(hwndTabCtrl, rc);
+    SendMessageW(hwndTabCtrl, TCM_ADJUSTRECT, FALSE, (LPARAM)rc);
+    MapWindowPoints(hwndTabCtrl, hwndDlg, (POINT *)rc, 2);
+}
+
+/* hands the active page's header to the native view */
+static void PROPSHEET_SetNativeWizardHeader(HWND hwndDlg, const PropSheetInfo *psInfo)
+{
+    HPROPSHEETPAGE hpsp = NULL;
+    WCHAR text[512];
+    DWORD flags;
+    int len;
+
+    if (!PROPSHEET_IsNativeWizard(hwndDlg, psInfo)) return;
+    if (psInfo->active_page >= 0 && psInfo->active_page < psInfo->nPages)
+        hpsp = psInfo->proppage[psInfo->active_page].hpage;
+    flags = HPSP_get_flags(hpsp);
+    text[0] = 0;
+    if (hpsp && !(flags & PSP_HIDEHEADER) &&
+        (psInfo->ppshheader.dwFlags & (PSH_WIZARD97_OLD | PSH_WIZARD97_NEW)) &&
+        (psInfo->ppshheader.dwFlags & PSH_HEADER))
+    {
+        if (flags & PSP_USEHEADERTITLE) HPSP_get_header_text(hpsp, TRUE, text, 256);
+        len = lstrlenW(text);
+        if (flags & PSP_USEHEADERSUBTITLE)
+        {
+            text[len++] = '\n';
+            HPSP_get_header_text(hpsp, FALSE, text + len, ARRAY_SIZE(text) - len);
+        }
+    }
+    SetWindowTextW(GetDlgItem(hwndDlg, IDC_TABCONTROL), text);
+}
+
+/******************************************************************************
  *            PROPSHEET_GetPageRect
  *
  * Retrieve rect from tab control and map into the dialog for SetWindowPos
@@ -663,6 +739,12 @@ static void PROPSHEET_GetPageRect(const PropSheetInfo * psInfo, HWND hwndDlg,
             GetClientRect(hwndChild, &r);
             MapWindowPoints(hwndChild, hwndDlg, (LPPOINT) &r, 2);
             rc->top += r.bottom + 1;
+        }
+
+        if (PROPSHEET_IsNativeWizard(hwndDlg, psInfo))
+        {
+            PROPSHEET_GetNativeWizardArea(hwndDlg, &r);
+            OffsetRect(rc, r.left, r.top);
         }
     } else {
         HWND hwndTabCtrl = GetDlgItem(hwndDlg, IDC_TABCONTROL);
@@ -1171,6 +1253,18 @@ static BOOL PROPSHEET_AdjustSizeWizard(HWND hwndDlg, const PropSheetInfo* psInfo
 
   TRACE("Biggest page %s\n", wine_dbgstr_rect(&rc));
 
+  if (PROPSHEET_IsNativeWizard(hwndDlg, psInfo))
+  {
+    /* MNC Win32-to-SwiftUI: the tab control spans the page area and the
+     * steps its native view keeps beside it */
+    HWND hwndTabCtrl = GetDlgItem(hwndDlg, IDC_TABCONTROL);
+
+    SendMessageW(hwndTabCtrl, TCM_ADJUSTRECT, TRUE, (LPARAM)&rc);
+    OffsetRect(&rc, -rc.left, -rc.top);
+    TRACE("native wizard, tab control (0,0)-(%ld,%ld)\n", rc.right, rc.bottom);
+    SetWindowPos(hwndTabCtrl, 0, 0, 0, rc.right, rc.bottom, SWP_NOZORDER | SWP_NOACTIVATE);
+  }
+
   /* Add space for the buttons row */
   GetWindowRect(hwndLine, &lineRect);
   MapWindowPoints(NULL, hwndDlg, (LPPOINT)&lineRect, 2);
@@ -1278,6 +1372,44 @@ static BOOL PROPSHEET_AdjustButtons(HWND hwndParent, const PropSheetInfo* psInfo
 }
 
 /******************************************************************************
+ *            PROPSHEET_AdjustButtonsNativeWizard
+ *
+ * MNC Win32-to-SwiftUI: the macOS assistant order. Help and Cancel at the
+ * left, Back and Next (or Finish, in the same place) at the right.
+ */
+static void PROPSHEET_AdjustButtonsNativeWizard(HWND hwndParent, const PropSheetInfo *psInfo,
+                                                PADDING_INFO padding, int buttonWidth, int y)
+{
+  const UINT flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE;
+  HWND hwndButton;
+  RECT rcSheet;
+  int x = padding.x;
+
+  GetClientRect(hwndParent, &rcSheet);
+
+  hwndButton = GetDlgItem(hwndParent, IDHELP);
+  if (psInfo->hasHelp)
+  {
+    SetWindowPos(hwndButton, 0, x, y, 0, 0, flags);
+    x += padding.x + buttonWidth;
+  }
+  else
+    ShowWindow(hwndButton, SW_HIDE);
+  SetWindowPos(GetDlgItem(hwndParent, IDCANCEL), 0, x, y, 0, 0, flags);
+
+  x = rcSheet.right - padding.x - buttonWidth;
+  hwndButton = GetDlgItem(hwndParent, IDC_FINISH_BUTTON);
+  SetWindowPos(hwndButton, 0, x, y, 0, 0, flags);
+  if (psInfo->hasFinish)
+    x -= padding.x + buttonWidth;
+  else
+    ShowWindow(hwndButton, SW_HIDE);
+  SetWindowPos(GetDlgItem(hwndParent, IDC_NEXT_BUTTON), 0, x, y, 0, 0, flags);
+  x -= padding.x + buttonWidth;
+  SetWindowPos(GetDlgItem(hwndParent, IDC_BACK_BUTTON), 0, x, y, 0, 0, flags);
+}
+
+/******************************************************************************
  *            PROPSHEET_AdjustButtonsWizard
  *
  * Adjusts the buttons' positions.
@@ -1318,6 +1450,12 @@ static BOOL PROPSHEET_AdjustButtonsWizard(HWND hwndParent,
    * All buttons will be at this y coordinate.
    */
   y = rcSheet.bottom - (padding.y + buttonHeight);
+
+  if (PROPSHEET_IsNativeWizard(hwndParent, psInfo))
+  {
+    PROPSHEET_AdjustButtonsNativeWizard(hwndParent, psInfo, padding, buttonWidth, y);
+    goto lines;
+  }
   
   /*
    * Position the Back button.
@@ -1378,6 +1516,7 @@ static BOOL PROPSHEET_AdjustButtonsWizard(HWND hwndParent,
   else
     ShowWindow(hwndButton, SW_HIDE);
 
+lines:
   if (psInfo->ppshheader.dwFlags &
       (PSH_WIZARD97_OLD | PSH_WIZARD97_NEW | PSH_WIZARD_LITE)) 
       padding.x = 0;
@@ -1398,8 +1537,13 @@ static BOOL PROPSHEET_AdjustButtonsWizard(HWND hwndParent,
   
   SetWindowPos(hwndLineHeader, 0, 0, 0, rcSheet.right, 2,
 	       SWP_NOZORDER | SWP_NOMOVE | SWP_NOACTIVATE);
-  if (!(psInfo->ppshheader.dwFlags & (PSH_WIZARD97_OLD | PSH_WIZARD97_NEW)))
+  if (!(psInfo->ppshheader.dwFlags & (PSH_WIZARD97_OLD | PSH_WIZARD97_NEW)) ||
+      PROPSHEET_IsNativeWizard(hwndParent, psInfo))
       ShowWindow(hwndLineHeader, SW_HIDE);
+
+  /* MNC Win32-to-SwiftUI: the native view sets the steps and the header apart */
+  if (PROPSHEET_IsNativeWizard(hwndParent, psInfo))
+      ShowWindow(hwndLine, SW_HIDE);
 
   return TRUE;
 }
@@ -1718,11 +1862,14 @@ static BOOL PROPSHEET_ShowPage(HWND hwndDlg, int index, PropSheetInfo * psInfo)
       hwndLineHeader = GetDlgItem(hwndDlg, IDC_SUNKEN_LINEHEADER);
       
       if ((HPSP_get_flags(psInfo->proppage[index].hpage) & PSP_HIDEHEADER) ||
-              (!(psInfo->ppshheader.dwFlags & PSH_HEADER)) )
+              (!(psInfo->ppshheader.dwFlags & PSH_HEADER)) ||
+              PROPSHEET_IsNativeWizard(hwndDlg, psInfo))
 	  ShowWindow(hwndLineHeader, SW_HIDE);
       else
 	  ShowWindow(hwndLineHeader, SW_SHOW);
   }
+
+  PROPSHEET_SetNativeWizardHeader(hwndDlg, psInfo);
 
   return TRUE;
 }
@@ -2673,6 +2820,8 @@ static void PROPSHEET_SetHeaderTitleW(HWND hwndDlg, UINT page_index, const WCHAR
         return;
 
     HPSP_set_header_title(psInfo->proppage[page_index].hpage, title);
+    if (page_index == psInfo->active_page)
+        PROPSHEET_SetNativeWizardHeader(hwndDlg, psInfo);
 }
 
 /******************************************************************************
@@ -2702,6 +2851,8 @@ static void PROPSHEET_SetHeaderSubTitleW(HWND hwndDlg, UINT page_index, const WC
         return;
 
     HPSP_set_header_subtitle(psInfo->proppage[page_index].hpage, subtitle);
+    if (page_index == psInfo->active_page)
+        PROPSHEET_SetNativeWizardHeader(hwndDlg, psInfo);
 }
 
 /******************************************************************************
@@ -3383,11 +3534,12 @@ static LRESULT PROPSHEET_Paint(HWND hwnd, HDC hdcParam)
     BITMAP bm;
     HBITMAP hbmp;
     HPALETTE hOldPal = 0;
-    int offsety = 0;
+    int offsetx = 0, offsety = 0;
     HBRUSH hbr;
     RECT r, rzone;
     HPROPSHEETPAGE hpsp;
     DWORD flags;
+    BOOL native = PROPSHEET_IsNativeWizard(hwnd, psInfo);
 
     hdc = hdcParam ? hdcParam : BeginPaint(hwnd, &ps);
     if (!hdc) return 1;
@@ -3403,7 +3555,15 @@ static LRESULT PROPSHEET_Paint(HWND hwnd, HDC hdcParam)
         hpsp = psInfo->proppage[psInfo->active_page].hpage;
     flags = HPSP_get_flags(hpsp);
 
-    if ( hpsp && !(flags & PSP_HIDEHEADER) &&
+    /* MNC Win32-to-SwiftUI: a native wizard's steps are left of the page area,
+     * and its native view draws the header */
+    if (native)
+    {
+        PROPSHEET_GetNativeWizardArea(hwnd, &r);
+        offsetx = r.left;
+    }
+
+    if ( hpsp && !native && !(flags & PSP_HIDEHEADER) &&
 	 (psInfo->ppshheader.dwFlags & (PSH_WIZARD97_OLD | PSH_WIZARD97_NEW)) &&
 	 (psInfo->ppshheader.dwFlags & PSH_HEADER) ) 
     {
@@ -3501,7 +3661,7 @@ static LRESULT PROPSHEET_Paint(HWND hwnd, HDC hdcParam)
 
 	GetClientRect(hwndLine, &r);
 	MapWindowPoints(hwndLine, hwnd, (LPPOINT) &r, 2);
-        SetRect(&rzone, 0, 0, r.right, r.top - 1);
+        SetRect(&rzone, offsetx, 0, r.right, r.top - 1);
 
 	hbr = GetSysColorBrush(COLOR_WINDOW);
 	FillRect(hdc, &rzone, hbr);
@@ -3511,7 +3671,7 @@ static LRESULT PROPSHEET_Paint(HWND hwnd, HDC hdcParam)
 
         /* The watermark is truncated to a width of 164 pixels */
         r.right = min(r.right, 164);
-	BitBlt(hdc, 0, offsety, min(bm.bmWidth, r.right),
+	BitBlt(hdc, offsetx, offsety, min(bm.bmWidth, r.right),
 	       min(bm.bmHeight, r.bottom), hdcSrc, 0, 0, SRCCOPY);
 
 	/* If the bitmap is not big enough, fill the remaining area
@@ -3519,8 +3679,8 @@ static LRESULT PROPSHEET_Paint(HWND hwnd, HDC hdcParam)
 	if (r.top > bm.bmHeight) {
 	    r.bottom = r.top - 1;
 	    r.top = bm.bmHeight;
-	    r.left = 0;
-	    r.right = bm.bmWidth;
+	    r.left = offsetx;
+	    r.right = offsetx + bm.bmWidth;
 	    hbr = CreateSolidBrush(GetPixel(hdcSrc, 0, 0));
 	    FillRect(hdc, &r, hbr);
 	    DeleteObject(hbr);
@@ -3618,7 +3778,9 @@ PROPSHEET_DialogProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 
       if (psInfo->ppshheader.dwFlags & INTRNL_ANY_WIZARD)
       {
-        ShowWindow(hwndTabCtrl, SW_HIDE);
+        /* MNC Win32-to-SwiftUI: a native wizard's tab control shows the steps */
+        if (!PROPSHEET_IsNativeWizard(hwnd, psInfo))
+          ShowWindow(hwndTabCtrl, SW_HIDE);
         PROPSHEET_AdjustSizeWizard(hwnd, psInfo);
         PROPSHEET_AdjustButtonsWizard(hwnd, psInfo);
         SetFocus(GetDlgItem(hwnd, IDC_NEXT_BUTTON));

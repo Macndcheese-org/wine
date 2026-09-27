@@ -2437,6 +2437,29 @@ BOOL WINAPI PrintDlgA(LPPRINTDLGA lppd)
  *
  * See PrintDlgA.
  */
+/* MNC Win32-to-SwiftUI: the macOS print panel, as a sheet on the owner, when
+ * the native UI is on. win32swiftui.dll is only loaded (by user32) then; it
+ * declines without an owner window, PD_RETURNDEFAULT, Print Setup and the
+ * app's hooks, templates and pages, which keep wine's dialog. It fills
+ * hDevMode, hDevNames and hDC through winspool, as this file does. */
+static BOOL w2s_print_dlg( PRINTDLGW *pd, BOOL *ret )
+{
+    BOOL (WINAPI *pW2SPrintDlg)( PRINTDLGW *, BOOL * );
+    HMODULE module = GetModuleHandleW( L"win32swiftui.dll" );
+
+    if (!module || !(pW2SPrintDlg = (void *)GetProcAddress( module, "W2SPrintDlg" ))) return FALSE;
+    return pW2SPrintDlg( pd, ret );
+}
+
+static BOOL w2s_print_dlg_ex( PRINTDLGEXW *pd, HRESULT *hr )
+{
+    BOOL (WINAPI *pW2SPrintDlgEx)( PRINTDLGEXW *, HRESULT * );
+    HMODULE module = GetModuleHandleW( L"win32swiftui.dll" );
+
+    if (!module || !(pW2SPrintDlgEx = (void *)GetProcAddress( module, "W2SPrintDlgEx" ))) return FALSE;
+    return pW2SPrintDlgEx( pd, hr );
+}
+
 BOOL WINAPI PrintDlgW(LPPRINTDLGW lppd)
 {
     BOOL      bRet = FALSE;
@@ -2469,6 +2492,8 @@ BOOL WINAPI PrintDlgW(LPPRINTDLGW lppd)
 	COMDLG32_SetCommDlgExtendedError(CDERR_STRUCTSIZE);
 	return FALSE;
     }
+
+    if (w2s_print_dlg( lppd, &bRet )) return bRet;
 
     if(lppd->Flags & PD_RETURNDEFAULT) {
         PRINTER_INFO_2W *pbuf;
@@ -4207,6 +4232,8 @@ HRESULT WINAPI PrintDlgExW(LPPRINTDLGEXW lppd)
     if (!IsWindow(lppd->hwndOwner)) {
         return E_HANDLE;
     }
+
+    if (w2s_print_dlg_ex( lppd, &hr )) return hr;
 
     if (lppd->nStartPage != START_PAGE_GENERAL)
     {
