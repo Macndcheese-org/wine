@@ -665,6 +665,24 @@ static BOOL PROPSHEET_IsNativeWizard(HWND hwndDlg, const PropSheetInfo *psInfo)
            GetPropW(GetDlgItem(hwndDlg, IDC_TABCONTROL), L"__wine_native_wizard");
 }
 
+/******************************************************************************
+ *            PROPSHEET_IsNativeSidebar
+ *
+ * MNC Win32-to-SwiftUI: with the native UI on, win32swiftui.dll translates a
+ * property sheet's tab control (more than 5 pages) into the System Settings
+ * layout: the page titles as rows in a sidebar. It marks the tab control with
+ * this property when it decides the sidebar at the first TCM_ADJUSTRECT (see
+ * tab_layout in win32swiftui), and removes it when the view goes. The tab
+ * control then spans the whole client height of the dialog, flush with the
+ * left edge, and wine lays the sheet out around its TCM_ADJUSTRECT: the pages
+ * go right of the sidebar, the buttons stay at the bottom right.
+ */
+static BOOL PROPSHEET_IsNativeSidebar(HWND hwndDlg, const PropSheetInfo *psInfo)
+{
+    return psInfo && !(psInfo->ppshheader.dwFlags & INTRNL_ANY_WIZARD) &&
+           GetPropW(GetDlgItem(hwndDlg, IDC_TABCONTROL), L"__wine_native_sidebar");
+}
+
 /* the page area of a native wizard, in dialog coordinates: the tab control
  * less what its native view keeps for the steps */
 static void PROPSHEET_GetNativeWizardArea(HWND hwndDlg, RECT *rc)
@@ -1210,16 +1228,35 @@ static BOOL PROPSHEET_AdjustSize(HWND hwndDlg, PropSheetInfo* psInfo)
 
   rc.right -= rc.left;
   rc.bottom -= rc.top;
-  TRACE("setting tab %p, rc (0,0)-(%ld,%ld)\n", hwndTabCtrl, rc.right, rc.bottom);
-  SetWindowPos(hwndTabCtrl, 0, 0, 0, rc.right, rc.bottom,
-               SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+  if (PROPSHEET_IsNativeSidebar(hwndDlg, psInfo))
+  {
+    /* MNC Win32-to-SwiftUI: the sidebar spans the full height of the dialog's
+     * client area, top to bottom beside the button row, flush with the left
+     * edge. The sheet keeps its overall size: the tab control takes the page
+     * area's width and the whole client height, with the template's right
+     * margin only. The pages keep coming from TCM_ADJUSTRECT
+     * (PROPSHEET_GetPageRect): a page keeps its width and gains blank space
+     * behind the button row, which the buttons cover. */
+    LONG tabW = rc.right, clientW = rc.right + padding.x,
+         clientH = rc.bottom + buttonHeight + (3 * padding.y);
+    TRACE("native sidebar, tab (0,0)-(%ld,%ld)\n", tabW, clientH);
+    SetWindowPos(hwndTabCtrl, 0, 0, 0, tabW, clientH,
+                 SWP_NOZORDER | SWP_NOACTIVATE);
+    SetRect(&rc, 0, 0, clientW, clientH);
+  }
+  else
+  {
+    TRACE("setting tab %p, rc (0,0)-(%ld,%ld)\n", hwndTabCtrl, rc.right, rc.bottom);
+    SetWindowPos(hwndTabCtrl, 0, 0, 0, rc.right, rc.bottom,
+                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
 
-  GetClientRect(hwndTabCtrl, &rc);
+    GetClientRect(hwndTabCtrl, &rc);
 
-  TRACE("tab client rc %s\n", wine_dbgstr_rect(&rc));
+    TRACE("tab client rc %s\n", wine_dbgstr_rect(&rc));
 
-  rc.right += (padding.x * 2);
-  rc.bottom += buttonHeight + (3 * padding.y);
+    rc.right += (padding.x * 2);
+    rc.bottom += buttonHeight + (3 * padding.y);
+  }
 
   style = GetWindowLongW(hwndDlg, GWL_STYLE);
   if (!(style & WS_CHILD))
@@ -1295,6 +1332,19 @@ static BOOL PROPSHEET_AdjustButtons(HWND hwndParent, const PropSheetInfo* psInfo
   int num_buttons = 2;
   int buttonWidth, buttonHeight;
   PADDING_INFO padding = PROPSHEET_GetPaddingInfo(hwndParent);
+
+  if (PROPSHEET_IsNativeSidebar(hwndParent, psInfo))
+  {
+    /* MNC Win32-to-SwiftUI: the tab control sits at (0,0), so its position
+     * gives no margins; the buttons keep the template's 4-dialog-unit
+     * margins at the bottom right, right of the sidebar. */
+    RECT units;
+    units.left = units.top = 0;
+    units.right = units.bottom = 4;
+    MapDialogRect(hwndParent, &units);
+    padding.x = units.right;
+    padding.y = units.bottom;
+  }
 
   if (psInfo->hasApply)
     num_buttons++;
