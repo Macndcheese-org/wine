@@ -1373,6 +1373,19 @@ static INT_PTR CALLBACK taskdialog_proc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
     return TRUE;
 }
 
+/* MNC Win32-to-SwiftUI: an NSAlert when the native UI is on. win32swiftui.dll
+ * is only loaded (by user32) then; it gets comctl32's module for the common
+ * buttons' localized labels, and declines what it can't show. */
+static BOOL w2s_task_dialog(const TASKDIALOGCONFIG *taskconfig, int *button, int *radio_button,
+                            BOOL *verification_flag_checked, HRESULT *hr)
+{
+    BOOL (WINAPI *pW2STaskDialog)(const TASKDIALOGCONFIG *, int *, int *, BOOL *, HINSTANCE, HRESULT *);
+    HMODULE module = GetModuleHandleW(L"win32swiftui.dll");
+
+    if (!module || !(pW2STaskDialog = (void *)GetProcAddress(module, "W2STaskDialog"))) return FALSE;
+    return pW2STaskDialog(taskconfig, button, radio_button, verification_flag_checked, COMCTL32_hModule, hr);
+}
+
 /***********************************************************************
  * TaskDialogIndirect [COMCTL32.@]
  */
@@ -1381,12 +1394,15 @@ HRESULT WINAPI TaskDialogIndirect(const TASKDIALOGCONFIG *taskconfig, int *butto
 {
     struct taskdialog_info dialog_info;
     DLGTEMPLATE *template;
+    HRESULT hr;
     INT ret;
 
     TRACE("%p, %p, %p, %p\n", taskconfig, button, radio_button, verification_flag_checked);
 
     if (!taskconfig || taskconfig->cbSize != sizeof(TASKDIALOGCONFIG))
         return E_INVALIDARG;
+
+    if (w2s_task_dialog(taskconfig, button, radio_button, verification_flag_checked, &hr)) return hr;
 
     dialog_info.taskconfig = taskconfig;
 
