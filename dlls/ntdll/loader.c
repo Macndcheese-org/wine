@@ -4179,7 +4179,10 @@ static NTSTATUS find_builtin_without_file( const WCHAR *name, UNICODE_STRING *ne
 
     if (contains_path( name )) return status;
 
-    if (!is_prefix_bootstrap && !mnc_wow64_builtin_nofile())
+    /* MNC Win32-to-SwiftUI: user32 loads win32swiftui.dll by name. It ships
+     * with the engine, so prefixes made before it (or before its 32-bit build)
+     * have no file for it in system32 or syswow64. */
+    if (!is_prefix_bootstrap && !mnc_wow64_builtin_nofile() && wcsicmp( name, L"win32swiftui.dll" ))
     {
         /* 16-bit files can't be loaded from the prefix */
         if (!name[1] || wcscmp( name + wcslen(name) - 2, L"16" )) return status;
