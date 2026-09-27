@@ -81,6 +81,16 @@
     BOOL fakingClose;
 
     CAShapeLayer* contentViewMaskLayer;
+
+    /* MNC Win32-to-SwiftUI: a native sidebar (mnc_w2s.m). The window's content
+       is then a split view, wine's view is in its detail pane, and the window
+       is wider than wine's content by w2sLeading and taller by w2sTop (the
+       toolbar the sidebar's toggle lives in). */
+    NSSplitViewController* w2sSplit;
+    NSSplitViewItem* w2sSidebarItem;
+    NSView* w2sWineView;
+    id w2sToolbarDelegate;
+    CGFloat w2sLeading, w2sSidebarWidth, w2sTop;
 }
 
 @property (retain, readonly, nonatomic) WineEventQueue* queue;
@@ -108,6 +118,9 @@
     - (void) updateForCursorClipping;
 
     - (void) setRetinaMode:(BOOL)mode;
+
+    /* the view wine draws in: the content view, or the detail pane's with a native sidebar */
+    - (NSView*) wineContentView;
 
 @end
 
