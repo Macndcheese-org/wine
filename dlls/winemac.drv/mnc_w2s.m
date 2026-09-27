@@ -63,6 +63,42 @@
         return YES;
     }
 
+    /* The control's rectangle, reaching outsetTop above it (the view is flipped,
+       as wine's content view is). */
+    - (void) w2sApplyFrame:(NSRect)frame
+    {
+        wineFrame = frame;
+        frame.origin.y -= outsetTop;
+        frame.size.height += outsetTop;
+        if (!NSEqualRects([self frame], frame))
+            [self setFrame:frame];
+    }
+
+    - (void) w2sSetOutsetTop:(NSNumber*)top
+    {
+        outsetTop = MAX(0, [top doubleValue]);
+        [self w2sApplyFrame:wineFrame];
+    }
+
+    - (BOOL) w2sBehind
+    {
+        return behind;
+    }
+
+    - (void) w2sSetBehind:(NSNumber*)flag
+    {
+        NSView* superview = [self superview];
+
+        behind = [flag boolValue];
+        if (behind && superview)
+        {
+            [self retain];
+            [self removeFromSuperview];
+            [superview addSubview:self positioned:NSWindowBelow relativeTo:nil];
+            [self release];
+        }
+    }
+
     /* Transparent where nothing native is drawn, so those clicks reach wine. */
     - (NSView*) hitTest:(NSPoint)point
     {
@@ -201,10 +237,9 @@ void macdrv_w2s_set_host_geometry(WineW2SHostView *view, WineWindow *window, CGR
         if (content && [view superview] != content)
         {
             [view removeFromSuperview];
-            [content addSubview:view positioned:NSWindowAbove relativeTo:nil];
+            [content addSubview:view positioned:([view w2sBehind] ? NSWindowBelow : NSWindowAbove) relativeTo:nil];
         }
-        if (!NSEqualRects([view frame], frame))
-            [view setFrame:frame];
+        [view w2sApplyFrame:frame];
         [view setHidden:hidden || !content || NSIsEmptyRect(frame)];
     });
 }
