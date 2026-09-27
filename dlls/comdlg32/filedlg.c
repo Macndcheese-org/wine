@@ -4148,6 +4148,18 @@ static inline BOOL is_win16_looks(DWORD flags)
 
 /* ------------------ APIs ---------------------- */
 
+/* MNC Win32-to-SwiftUI: the macOS open/save panel when the native UI is on.
+ * win32swiftui.dll is only loaded (by user32) when it is; it declines what the
+ * panel can't do (hooks, templates, Win 3.1 looks) and wine's dialog runs. */
+static BOOL w2s_file_dialog( OPENFILENAMEW *ofn, BOOL save, BOOL *ret )
+{
+    BOOL (WINAPI *pW2SFileDialog)( OPENFILENAMEW *, BOOL, BOOL * );
+    HMODULE module = GetModuleHandleW( L"win32swiftui.dll" );
+
+    if (!module || !(pW2SFileDialog = (void *)GetProcAddress( module, "W2SFileDialog" ))) return FALSE;
+    return pW2SFileDialog( ofn, save, ret );
+}
+
 /***********************************************************************
  *            GetOpenFileNameA  (COMDLG32.@)
  *
@@ -4195,6 +4207,8 @@ BOOL WINAPI GetOpenFileNameA(OPENFILENAMEA *ofn)
  */
 BOOL WINAPI GetOpenFileNameW(OPENFILENAMEW *ofn)
 {
+    BOOL ret;
+
     TRACE("flags 0x%08lx\n", ofn->Flags);
 
     if (!valid_struct_size( ofn->lStructSize ))
@@ -4206,6 +4220,8 @@ BOOL WINAPI GetOpenFileNameW(OPENFILENAMEW *ofn)
     /* OFN_FILEMUSTEXIST implies OFN_PATHMUSTEXIST */
     if (ofn->Flags & OFN_FILEMUSTEXIST)
         ofn->Flags |= OFN_PATHMUSTEXIST;
+
+    if (w2s_file_dialog( ofn, FALSE, &ret )) return ret;
 
     if (is_win16_looks(ofn->Flags))
         return GetFileName31W(ofn, OPEN_DIALOG);
@@ -4261,11 +4277,15 @@ BOOL WINAPI GetSaveFileNameA(OPENFILENAMEA *ofn)
 BOOL WINAPI GetSaveFileNameW(
 	LPOPENFILENAMEW ofn) /* [in/out] address of init structure */
 {
+    BOOL ret;
+
     if (!valid_struct_size( ofn->lStructSize ))
     {
         COMDLG32_SetCommDlgExtendedError( CDERR_STRUCTSIZE );
         return FALSE;
     }
+
+    if (w2s_file_dialog( ofn, TRUE, &ret )) return ret;
 
     if (is_win16_looks(ofn->Flags))
         return GetFileName31W(ofn, SAVE_DIALOG);

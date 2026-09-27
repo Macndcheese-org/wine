@@ -1630,6 +1630,9 @@ static NSString* WineLocalizedString(unsigned int stringID)
                     NSPoint nspoint = [self flippedMouseLocation:NSPointFromCGPoint(pt)];
                     NSRect contentRect = [window contentRectForFrameRect:[window frame]];
                     process = NSMouseInRect(nspoint, contentRect, NO);
+                    /* MNC Win32-to-SwiftUI: the native control handles it. */
+                    if (process && macdrv_w2s_event_in_host(theEvent))
+                        process = FALSE;
                     if (process && [window styleMask] & NSWindowStyleMaskResizable)
                     {
                         // Ignore clicks in the grow box (resize widget).
@@ -1745,7 +1748,8 @@ static NSString* WineLocalizedString(unsigned int stringID)
                 // Only process the event if it was in the window's content area.
                 NSPoint nspoint = [self flippedMouseLocation:NSPointFromCGPoint(pt)];
                 NSRect contentRect = [window contentRectForFrameRect:[window frame]];
-                process = NSMouseInRect(nspoint, contentRect, NO);
+                process = NSMouseInRect(nspoint, contentRect, NO) &&
+                          !macdrv_w2s_event_in_host(theEvent); /* MNC Win32-to-SwiftUI */
             }
 
             if (process)

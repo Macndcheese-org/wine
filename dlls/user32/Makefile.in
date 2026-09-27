@@ -65,6 +65,7 @@ SOURCES = \
 	uitools.c \
 	user32.rc \
 	user_main.c \
+	w2s.c \
 	win.c \
 	winhelp.c \
 	winproc.c \

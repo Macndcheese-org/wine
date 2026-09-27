@@ -393,6 +393,7 @@ HWND WIN_CreateWindowEx( CREATESTRUCTW *cs, LPCWSTR className, HINSTANCE module,
                                  cs->lpCreateParams, 0, cs->hInstance, className, !unicode );
     if (!hwnd && menu && menu != cs->hMenu) NtUserDestroyMenu( menu );
     if (!unicode && window_name.Buffer != name_buf) RtlFreeUnicodeString( &window_name );
+    if (hwnd) w2s_window_created( hwnd ); /* MNC Win32-to-SwiftUI */
     return hwnd;
 }
 
