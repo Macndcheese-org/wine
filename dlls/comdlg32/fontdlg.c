@@ -171,14 +171,72 @@ static void _dump_cf_flags(DWORD cflags)
  *  TRUE:  Ok button clicked.
  *  FALSE: Cancel button clicked, or error.
  */
+/* MNC Win32-to-SwiftUI: the macOS font panel when the native UI is on.
+ * win32swiftui.dll is only loaded (by user32) then; it declines hooks and
+ * templates, which keep wine's dialog, and printer-only font lists. */
+static BOOL w2s_choose_font( CHOOSEFONTW *cf, BOOL *ret )
+{
+    BOOL (WINAPI *pW2SChooseFont)( CHOOSEFONTW *, BOOL * );
+    HMODULE module = GetModuleHandleW( L"win32swiftui.dll" );
+
+    if (!module || !(pW2SChooseFont = (void *)GetProcAddress( module, "W2SChooseFont" ))) return FALSE;
+    return pW2SChooseFont( cf, ret );
+}
+
+/* the same through a CHOOSEFONTW, the LOGFONT and style name converted */
+static BOOL w2s_choose_font_a( CHOOSEFONTA *cf, BOOL *ret )
+{
+    CHOOSEFONTW cfw;
+    LOGFONTW lfw;
+    WCHAR style[LF_FACESIZE];
+
+    if (!GetModuleHandleW( L"win32swiftui.dll" )) return FALSE;
+    if (cf->lStructSize != sizeof(*cf) || !cf->lpLogFont) return FALSE;
+
+    memcpy( &cfw, cf, sizeof(cfw) );
+    cfw.lStructSize = sizeof(cfw);
+    cfw.lpTemplateName = NULL;
+    cfw.lpLogFont = &lfw;
+    memcpy( &lfw, cf->lpLogFont, FIELD_OFFSET( LOGFONTA, lfFaceName ) );
+    MultiByteToWideChar( CP_ACP, 0, cf->lpLogFont->lfFaceName, -1, lfw.lfFaceName, LF_FACESIZE );
+    lfw.lfFaceName[LF_FACESIZE - 1] = 0;
+    cfw.lpszStyle = NULL;
+    if ((cf->Flags & CF_USESTYLE) && cf->lpszStyle)
+    {
+        MultiByteToWideChar( CP_ACP, 0, cf->lpszStyle, -1, style, LF_FACESIZE );
+        style[LF_FACESIZE - 1] = 0;
+        cfw.lpszStyle = style;
+    }
+
+    if (!w2s_choose_font( &cfw, ret )) return FALSE;
+    if (*ret)
+    {
+        memcpy( cf->lpLogFont, &lfw, FIELD_OFFSET( LOGFONTA, lfFaceName ) );
+        WideCharToMultiByte( CP_ACP, 0, lfw.lfFaceName, -1, cf->lpLogFont->lfFaceName, LF_FACESIZE, NULL, NULL );
+        cf->lpLogFont->lfFaceName[LF_FACESIZE - 1] = 0;
+        if (cfw.lpszStyle)
+        {
+            WideCharToMultiByte( CP_ACP, 0, style, -1, cf->lpszStyle, LF_FACESIZE, NULL, NULL );
+            cf->lpszStyle[LF_FACESIZE - 1] = 0;
+        }
+        cf->iPointSize = cfw.iPointSize;
+        cf->rgbColors = cfw.rgbColors;
+        cf->nFontType = cfw.nFontType;
+    }
+    return TRUE;
+}
+
 BOOL WINAPI ChooseFontW(LPCHOOSEFONTW lpChFont)
 {
     LPCVOID template;
     HRSRC hResInfo;
     HINSTANCE hDlginst;
     HGLOBAL hDlgTmpl;
+    BOOL ret;
 
     TRACE("(%p)\n", lpChFont);
+
+    if (w2s_choose_font( lpChFont, &ret )) return ret;
 
     if ( (lpChFont->Flags&CF_ENABLETEMPLATEHANDLE)!=0 )
     {
@@ -231,8 +289,11 @@ BOOL WINAPI ChooseFontA(LPCHOOSEFONTA lpChFont)
     HRSRC hResInfo;
     HINSTANCE hDlginst;
     HGLOBAL hDlgTmpl;
+    BOOL ret;
 
     TRACE("(%p)\n", lpChFont);
+
+    if (w2s_choose_font_a( lpChFont, &ret )) return ret;
 
     if ( (lpChFont->Flags&CF_ENABLETEMPLATEHANDLE)!=0 )
     {

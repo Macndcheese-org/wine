@@ -1268,14 +1268,28 @@ static INT_PTR CALLBACK ColorDlgProc( HWND hDlg, UINT message,
  *  TRUE:  Ok button clicked.
  *  FALSE: Cancel button clicked, or error.
  */
+/* MNC Win32-to-SwiftUI: the macOS colour panel when the native UI is on.
+ * win32swiftui.dll is only loaded (by user32) then; it declines hooks and
+ * templates, which keep wine's dialog. ChooseColorA comes through here. */
+static BOOL w2s_choose_color( CHOOSECOLORW *cc, BOOL *ret )
+{
+    BOOL (WINAPI *pW2SChooseColor)( CHOOSECOLORW *, BOOL * );
+    HMODULE module = GetModuleHandleW( L"win32swiftui.dll" );
+
+    if (!module || !(pW2SChooseColor = (void *)GetProcAddress( module, "W2SChooseColor" ))) return FALSE;
+    return pW2SChooseColor( cc, ret );
+}
+
 BOOL WINAPI ChooseColorW( CHOOSECOLORW *lpChCol )
 {
     HANDLE hDlgTmpl = 0;
     const void *template;
+    BOOL ret;
 
     TRACE("(%p)\n", lpChCol);
 
     if (!lpChCol) return FALSE;
+    if (w2s_choose_color( lpChCol, &ret )) return ret;
 
     if (lpChCol->Flags & CC_ENABLETEMPLATEHANDLE)
     {
