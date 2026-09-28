@@ -1004,6 +1004,17 @@ BOOL WINAPI ShellAboutA( HWND hWnd, LPCSTR szApp, LPCSTR szOtherStuff, HICON hIc
 }
 
 
+/* MNC Win32-to-SwiftUI: the standard macOS About panel when the native UI is
+ * on. win32swiftui.dll is only loaded (by user32) then. */
+static BOOL w2s_shell_about( HWND hwnd, const WCHAR *app, const WCHAR *other, HICON icon, BOOL *ret )
+{
+    BOOL (WINAPI *pW2SShellAbout)( HWND, const WCHAR *, const WCHAR *, HICON, BOOL * );
+    HMODULE module = GetModuleHandleW( L"win32swiftui.dll" );
+
+    if (!module || !(pW2SShellAbout = (void *)GetProcAddress( module, "W2SShellAbout" ))) return FALSE;
+    return pW2SShellAbout( hwnd, app, other, icon, ret );
+}
+
 /*************************************************************************
  * ShellAboutW                [SHELL32.289]
  */
@@ -1016,6 +1027,7 @@ BOOL WINAPI ShellAboutW( HWND hWnd, LPCWSTR szApp, LPCWSTR szOtherStuff,
 
     TRACE("\n");
 
+    if (w2s_shell_about( hWnd, szApp, szOtherStuff, hIcon, &bRet )) return bRet;
     if (!hIcon) hIcon = LoadImageW( 0, (LPWSTR)IDI_WINLOGO, IMAGE_ICON, 48, 48, LR_SHARED );
     info.szApp        = szApp;
     info.szOtherStuff = szOtherStuff;
