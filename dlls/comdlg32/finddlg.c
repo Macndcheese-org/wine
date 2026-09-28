@@ -432,6 +432,28 @@ cleanup:
         return hdlgwnd;
 }
 
+/* MNC Win32-to-SwiftUI: AppKit's Find panel when the native UI is on
+ * (win32swiftui.dll is only loaded, by user32, then). It returns a hidden
+ * window standing for the dialog, or NULL for hooks and templates, which keep
+ * wine's dialog. */
+static HWND w2s_find_replace( FINDREPLACEW *fr, BOOL replace )
+{
+    HWND (WINAPI *pW2SFindReplace)( FINDREPLACEW *, BOOL );
+    HMODULE module = GetModuleHandleW( L"win32swiftui.dll" );
+
+    if (!module || !(pW2SFindReplace = (void *)GetProcAddress( module, "W2SFindReplace" ))) return NULL;
+    return pW2SFindReplace( fr, replace );
+}
+
+static HWND w2s_find_replace_a( FINDREPLACEA *fr, BOOL replace )
+{
+    HWND (WINAPI *pW2SFindReplaceA)( FINDREPLACEA *, BOOL );
+    HMODULE module = GetModuleHandleW( L"win32swiftui.dll" );
+
+    if (!module || !(pW2SFindReplaceA = (void *)GetProcAddress( module, "W2SFindReplaceA" ))) return NULL;
+    return pW2SFindReplaceA( fr, replace );
+}
+
 /***********************************************************************
  *	FindTextA 				[COMDLG32.@]
  *
@@ -441,11 +463,13 @@ HWND WINAPI FindTextA(
 	LPFINDREPLACEA pfr	/* [in] Find/replace structure*/
 ) {
 	COMDLG32_FR_Data *pdata;
+        HWND hwnd;
 
         TRACE("LPFINDREPLACE=%p\n", pfr);
 
 	if(!COMDLG32_FR_CheckPartial(pfr, FALSE))
 		return 0;
+        if ((hwnd = w2s_find_replace_a( pfr, FALSE ))) return hwnd;
 
 	if(!(pdata = malloc(sizeof(COMDLG32_FR_Data))))
 	{
@@ -466,11 +490,13 @@ HWND WINAPI ReplaceTextA(
 	LPFINDREPLACEA pfr	/* [in] Find/replace structure*/
 ) {
 	COMDLG32_FR_Data *pdata;
+        HWND hwnd;
 
         TRACE("LPFINDREPLACE=%p\n", pfr);
 
 	if(!COMDLG32_FR_CheckPartial(pfr, TRUE))
 		return 0;
+        if ((hwnd = w2s_find_replace_a( pfr, TRUE ))) return hwnd;
 
 	if(!(pdata = malloc(sizeof(COMDLG32_FR_Data))))
 	{
@@ -492,19 +518,6 @@ HWND WINAPI ReplaceTextA(
  *		Window handle to created dialog: Success
  *		NULL: Failure
  */
-/* MNC Win32-to-SwiftUI: AppKit's Find panel when the native UI is on
- * (win32swiftui.dll is only loaded, by user32, then). It returns a hidden
- * window standing for the dialog, or NULL for hooks and templates, which keep
- * wine's dialog. */
-static HWND w2s_find_replace( FINDREPLACEW *fr, BOOL replace )
-{
-    HWND (WINAPI *pW2SFindReplace)( FINDREPLACEW *, BOOL );
-    HMODULE module = GetModuleHandleW( L"win32swiftui.dll" );
-
-    if (!module || !(pW2SFindReplace = (void *)GetProcAddress( module, "W2SFindReplace" ))) return NULL;
-    return pW2SFindReplace( fr, replace );
-}
-
 HWND WINAPI FindTextW(
 	LPFINDREPLACEW pfr	/* [in] Find/replace structure*/
 ) {
