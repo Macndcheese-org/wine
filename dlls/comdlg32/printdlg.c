@@ -3874,6 +3874,19 @@ static void *pagesetup_get_template(pagesetup_data *data)
     return LockResource(tmpl_handle);
 }
 
+/* MNC Win32-to-SwiftUI: the macOS Page Setup sheet on the owner when the
+ * native UI is on (win32swiftui.dll is only loaded, by user32, then). It
+ * declines without an owner window and with hooks, templates or the
+ * PSD_DISABLE* flags, which keep wine's dialog. */
+static BOOL w2s_page_setup( PAGESETUPDLGW *psd, BOOL *ret )
+{
+    BOOL (WINAPI *pW2SPageSetupDlg)( PAGESETUPDLGW *, BOOL * );
+    HMODULE module = GetModuleHandleW( L"win32swiftui.dll" );
+
+    if (!module || !(pW2SPageSetupDlg = (void *)GetProcAddress( module, "W2SPageSetupDlg" ))) return FALSE;
+    return pW2SPageSetupDlg( psd, ret );
+}
+
 static BOOL pagesetup_common(pagesetup_data *data)
 {
     BOOL ret;
@@ -3927,6 +3940,8 @@ static BOOL pagesetup_common(pagesetup_data *data)
         pagesetup_update_papersize(data);
         return TRUE;
     }
+
+    if (data->unicode && w2s_page_setup(data->u.dlgw, &ret)) return ret;
 
     tmpl = pagesetup_get_template(data);
 
