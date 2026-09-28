@@ -142,6 +142,7 @@ extern void macdrv_SetLayeredWindowAttributes(HWND hwnd, COLORREF key, BYTE alph
 extern void macdrv_SetParent(HWND hwnd, HWND parent, HWND old_parent);
 extern void macdrv_SetWindowRgn(HWND hwnd, HRGN hrgn, BOOL redraw);
 extern void macdrv_SetWindowStyle(HWND hwnd, INT offset, STYLESTRUCT *style);
+extern void macdrv_FlashWindowEx(FLASHWINFO *info);
 extern void macdrv_SetWindowText(HWND hwnd, LPCWSTR text);
 extern UINT macdrv_ShowWindow(HWND hwnd, INT cmd, RECT *rect, UINT swp);
 extern LRESULT macdrv_SysCommand(HWND hwnd, WPARAM wparam, LPARAM lparam, const POINT *pos);

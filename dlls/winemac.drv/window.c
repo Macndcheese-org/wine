@@ -1546,6 +1546,25 @@ void macdrv_SetWindowStyle(HWND hwnd, INT offset, STYLESTRUCT *style)
 
 
 /*****************************************************************
+ *              FlashWindowEx   (MACDRV.@)
+ *
+ * MNC: a Mac app asks for attention with its Dock icon. A flash of the
+ * taskbar button bounces it once; FLASHW_TIMER and FLASHW_TIMERNOFG keep it
+ * bouncing until the app is activated; FLASHW_STOP ends it. A caption-only
+ * flash has no Mac equivalent. macOS ignores the request while the app is
+ * active, as Windows doesn't flash the foreground window.
+ */
+void macdrv_FlashWindowEx(FLASHWINFO *info)
+{
+    TRACE("%p flags %x count %u\n", info->hwnd, info->dwFlags, info->uCount);
+
+    if (!info->dwFlags) macdrv_request_attention(0);
+    else if (info->dwFlags & FLASHW_TRAY)
+        macdrv_request_attention((info->dwFlags & (FLASHW_TIMER | FLASHW_TIMERNOFG)) ? 2 : 1);
+}
+
+
+/*****************************************************************
  *              SetWindowText   (MACDRV.@)
  */
 void macdrv_SetWindowText(HWND hwnd, LPCWSTR text)

@@ -2574,6 +2574,22 @@ void macdrv_beep(void)
 }
 
 /***********************************************************************
+ *              macdrv_request_attention
+ *
+ * MNC: bounce the Dock icon. level 0: end the request; 1: once;
+ * 2: until the app is activated.
+ */
+void macdrv_request_attention(int level)
+{
+    OnMainThreadAsync(^{
+        static NSInteger request;
+
+        if (request) [NSApp cancelUserAttentionRequest:request];
+        request = level ? [NSApp requestUserAttention:level == 2 ? NSCriticalRequest : NSInformationalRequest] : 0;
+    });
+}
+
+/***********************************************************************
  *              macdrv_set_display_mode
  */
 int macdrv_set_display_mode(CGDirectDisplayID displayID, CGDisplayModeRef display_mode)
