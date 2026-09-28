@@ -492,16 +492,31 @@ HWND WINAPI ReplaceTextA(
  *		Window handle to created dialog: Success
  *		NULL: Failure
  */
+/* MNC Win32-to-SwiftUI: AppKit's Find panel when the native UI is on
+ * (win32swiftui.dll is only loaded, by user32, then). It returns a hidden
+ * window standing for the dialog, or NULL for hooks and templates, which keep
+ * wine's dialog. */
+static HWND w2s_find_replace( FINDREPLACEW *fr, BOOL replace )
+{
+    HWND (WINAPI *pW2SFindReplace)( FINDREPLACEW *, BOOL );
+    HMODULE module = GetModuleHandleW( L"win32swiftui.dll" );
+
+    if (!module || !(pW2SFindReplace = (void *)GetProcAddress( module, "W2SFindReplace" ))) return NULL;
+    return pW2SFindReplace( fr, replace );
+}
+
 HWND WINAPI FindTextW(
 	LPFINDREPLACEW pfr	/* [in] Find/replace structure*/
 ) {
 	COMDLG32_FR_Data *pdata;
         DWORD len;
+        HWND hwnd;
 
         TRACE("LPFINDREPLACE=%p\n", pfr);
 
 	if(!COMDLG32_FR_CheckPartial((LPFINDREPLACEA)pfr, FALSE))
 		return 0;
+        if ((hwnd = w2s_find_replace( pfr, FALSE ))) return hwnd;
 
         len = WideCharToMultiByte( CP_ACP, 0, pfr->lpstrFindWhat, pfr->wFindWhatLen,
                                    NULL, 0, NULL, NULL );
@@ -533,11 +548,13 @@ HWND WINAPI ReplaceTextW(
 ) {
 	COMDLG32_FR_Data *pdata;
         DWORD len1, len2;
+        HWND hwnd;
 
         TRACE("LPFINDREPLACE=%p\n", pfr);
 
 	if(!COMDLG32_FR_CheckPartial((LPFINDREPLACEA)pfr, TRUE))
 		return 0;
+        if ((hwnd = w2s_find_replace( pfr, TRUE ))) return hwnd;
 
         len1 = WideCharToMultiByte( CP_ACP, 0, pfr->lpstrFindWhat, pfr->wFindWhatLen,
                                     NULL, 0, NULL, NULL );
