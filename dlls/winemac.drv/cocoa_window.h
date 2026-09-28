@@ -82,15 +82,14 @@
 
     CAShapeLayer* contentViewMaskLayer;
 
-    /* MNC Win32-to-SwiftUI: a native sidebar (mnc_w2s.m). The window's content
-       is then a split view, wine's view is in its detail pane, and the window
-       is wider than wine's content by w2sLeading and taller by w2sTop (the
-       toolbar the sidebar's toggle lives in). */
-    NSSplitViewController* w2sSplit;
-    NSSplitViewItem* w2sSidebarItem;
+    /* MNC Win32-to-SwiftUI: a native toolbar in the window frame (mnc_w2s.m).
+       The window's content is then a plain container, wine's view sits in it
+       below the titlebar and toolbar, and the window is wider than wine's
+       content by w2sLeading + w2sTrailing (room for the toolbar's items) and
+       taller by w2sTop (the titlebar and toolbar over a full-size content view). */
+    BOOL w2sChrome;
     NSView* w2sWineView;
-    id w2sToolbarDelegate;
-    CGFloat w2sLeading, w2sSidebarWidth, w2sTop;
+    CGFloat w2sLeading, w2sTrailing, w2sTop;
 }
 
 @property (retain, readonly, nonatomic) WineEventQueue* queue;
@@ -119,22 +118,20 @@
 
     - (void) setRetinaMode:(BOOL)mode;
 
-    /* the view wine draws in: the content view, or the detail pane's with a native sidebar */
+    /* the view wine draws in: the content view, or the one under a native toolbar */
     - (NSView*) wineContentView;
 
 @end
 
-/* MNC Win32-to-SwiftUI: the native sidebar (mnc_w2s.m) */
-@interface WineWindow (W2SSidebar)
-    - (void) w2sAttachSidebar:(NSViewController*)sidebar width:(CGFloat)width;
-    /* for the runtime, which calls through performSelector: (no CGFloat there) */
-    - (void) w2sAttachSidebar:(NSViewController*)sidebar widthNumber:(NSNumber*)width;
-    - (void) w2sDetachSidebar;
-    - (void) w2sSidebarCollapsedChanged;
-    - (BOOL) w2sSidebarCollapsed;
-    - (void) w2sSetSidebarCollapsed:(NSNumber*)collapsed;
+/* MNC Win32-to-SwiftUI: a native toolbar in the window frame (mnc_w2s.m) */
+@interface WineWindow (W2SChrome)
+    /* spec: "toolbar" (NSToolbar), "style" (NSWindowToolbarStyle), "extraWidth"
+       (points the window is wider than wine's content, split both sides) */
+    - (void) w2sAttachToolbar:(NSDictionary*)spec;
+    - (void) w2sDetachToolbar;
+    - (void) w2sSetExtraWidth:(NSNumber*)extra;
     /* after the titlebar changed */
-    - (void) w2sUpdateSidebarInset;
+    - (void) w2sChromeChanged;
 @end
 
 

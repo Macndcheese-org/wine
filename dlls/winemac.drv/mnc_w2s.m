@@ -136,12 +136,12 @@ BOOL macdrv_w2s_event_in_host(NSEvent *event)
     NSView* hit;
 
     if (![window isKindOfClass:[WineWindow class]]) return NO;
-    /* Wine's own view: with a window sidebar that's the split view's detail
-       pane, not the window's whole content view. */
+    /* Wine's own view: with a native toolbar that's inside the window's
+       content view, not all of it. */
     wineView = [(WineWindow*)window wineContentView];
     if (!wineView || ![wineView superview]) return NO;
-    /* Outside wine's view (the window sidebar, the toolbar): native, it never
-       reaches wine. */
+    /* Outside wine's view (the toolbar, the margins beside wine's content):
+       native, it never reaches wine. */
     hit = [wineView hitTest:[[wineView superview] convertPoint:[event locationInWindow] fromView:nil]];
     if (!hit) return YES;
     return macdrv_w2s_host_for_view(hit) != nil;
@@ -173,8 +173,8 @@ BOOL macdrv_w2s_key_goes_to_wine(NSEvent *event, NSResponder *responder)
     view = (NSView*)responder;
     if (macdrv_w2s_host_for_view(view))
         return YES;
-    /* The window sidebar's list and friends: Tab/Escape/Return drive the
-       Win32 dialog even when the first responder is outside wine's view. */
+    /* A native toolbar and friends: Tab/Escape/Return drive the Win32
+       dialog even when the first responder is outside wine's view. */
     window = [view window];
     if (![window isKindOfClass:[WineWindow class]])
         return NO;
@@ -266,16 +266,15 @@ void macdrv_w2s_post_wake(WineW2SHostView *view, uint64_t cookie)
 
 
 /***********************************************************************
- *              A real window sidebar (MNC Win32-to-SwiftUI)
+ *              A native toolbar in the window frame (MNC Win32-to-SwiftUI)
  *
- * A property sheet with more than 5 pages gets a native sidebar: the
- * window gets an NSSplitViewController whose sidebar item is a native
- * sidebar (full window height, system material), with the system toggle
- * in a unified toolbar, like a NavigationSplitView app. Wine's own content
- * (the pages and OK/Cancel/Apply) lives in the split view's detail pane;
- * the window is wider than wine's content by w2sLeading and taller by
- * w2sTop. Collapsing the sidebar grows/shrinks the window by its width, so
- * wine's content (fixed-size Win32 pages) never changes.
+ * The runtime puts an NSToolbar in the window's frame, where a Mac app's
+ * toolbar is: a settings window's panes (a property sheet with many pages),
+ * later an app's own toolbar. The window gets a full-size content view, a
+ * plain container, and wine's own view sits in it below the titlebar and
+ * toolbar (w2sTop), with margins beside it when the toolbar needs more room
+ * than wine's content has (w2sLeading, w2sTrailing). The window grows around
+ * wine's content, which neither moves nor changes size.
  */
 
 /* cocoa_window.m's own (class extension) */
@@ -284,218 +283,127 @@ void macdrv_w2s_post_wake(WineW2SHostView *view, uint64_t cookie)
 @end
 
 /* The titlebar and toolbar over a full-size content view: what the content
-   layout rect leaves out at the top. A unified toolbar's usual height when
-   the window can't tell yet. */
+   layout rect leaves out at the top. A toolbar's usual height when the
+   window can't tell yet. */
 static CGFloat w2s_toolbar_height(NSWindow* window)
 {
     CGFloat top = NSHeight([window frame]) - NSMaxY([window contentLayoutRect]);
     return (top > 0 && top < 200) ? top : 52;
 }
 
-/* The sidebar's content starts below the titlebar and toolbar it runs
-   under, as a NavigationSplitView's list does: AppKit doesn't always give a
-   full-height sidebar item that safe area, so add what's missing. */
-static void w2s_inset_sidebar(NSView* view, CGFloat top)
-{
-    NSEdgeInsets extra = view.additionalSafeAreaInsets;
-    CGFloat given = view.safeAreaInsets.top - extra.top;
 
-    extra.top = top > given ? top - given : 0;
-    view.additionalSafeAreaInsets = extra;
+@implementation WineWindow (W2SChrome)
+
+/* wine's view in the container: below the toolbar, between the margins. It
+   sits at the origin of a holder that takes the place: wine positions its own
+   layer at its superlayer's origin (updateLayer), whatever the view's frame. */
+- (void) w2sLayoutWineView
+{
+    NSView* holder = [w2sWineView superview];
+    NSRect bounds = [[self contentView] bounds];
+
+    [holder setFrame:NSMakeRect(w2sLeading, 0, NSWidth(bounds) - w2sLeading - w2sTrailing,
+                                NSHeight(bounds) - w2sTop)];
+    [w2sWineView setFrame:[holder bounds]];
 }
 
-
-
-/* The split view's toolbar delegate: the system toggle and its separator
-   only, and the observer that keeps the window around the sidebar. The
-   window owns it (the toolbar's delegate is weak); it doesn't retain the
-   window back, which would keep both alive forever. */
-@interface W2SSidebarToolbarDelegate : NSObject<NSToolbarDelegate>
+- (void) w2sAttachToolbar:(NSDictionary*)spec
 {
-    WineWindow* window;     /* not retained: the window owns us */
-}
-- (instancetype) initWithWindow:(WineWindow*)win;
-@end
-
-
-@implementation W2SSidebarToolbarDelegate
-
-- (instancetype) initWithWindow:(WineWindow*)win
-{
-    self = [super init];
-    if (self)
-        window = win;
-    return self;
-}
-
-- (NSArray*) toolbarDefaultItemIdentifiers:(NSToolbar*)toolbar
-{
-    return [NSArray arrayWithObjects:NSToolbarToggleSidebarItemIdentifier,
-                     NSToolbarSidebarTrackingSeparatorItemIdentifier, nil];
-}
-
-- (NSArray*) toolbarAllowedItemIdentifiers:(NSToolbar*)toolbar
-{
-    return [self toolbarDefaultItemIdentifiers:toolbar];
-}
-
-- (NSToolbarItem*) toolbar:(NSToolbar*)toolbar itemForItemIdentifier:(NSString*)itemIdentifier
-    willBeInsertedIntoToolbar:(BOOL)flag
-{
-    return nil;  /* the toggle and the separator are system items */
-}
-
-- (void) observeValueForKeyPath:(NSString*)keyPath ofObject:(id)object
-                         change:(NSDictionary*)change context:(void*)context
-{
-    if ([keyPath isEqualToString:@"collapsed"])
-        [window w2sSidebarCollapsedChanged];
-    else
-        [super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
-}
-
-@end
-
-
-@implementation WineWindow (W2SSidebar)
-
-- (void) w2sAttachSidebar:(NSViewController*)sidebar width:(CGFloat)width
-{
+    NSToolbar* toolbar = [spec objectForKey:@"toolbar"];
+    CGFloat extra = [[spec objectForKey:@"extraWidth"] doubleValue];
     NSRect content;
     NSView* wineView;
-    NSSplitViewController* split;
-    NSSplitViewItem* side;
-    NSViewController* detailVC;
-    NSToolbar* toolbar;
-    W2SSidebarToolbarDelegate* delegate;
+    NSView* container;
+    NSView* holder;
     NSResponder* firstResponder;
 
     /* Main thread; attach once. */
-    if (w2sSplit || !sidebar || width <= 0) return;
+    if (w2sChrome || ![toolbar isKindOfClass:[NSToolbar class]]) return;
 
     content = [self contentRectForFrameRect:[self frame]];  /* wine's content, before */
     firstResponder = [self firstResponder];
     wineView = [[self contentView] retain];
-
-    split = [[NSSplitViewController alloc] init];
-    side = [NSSplitViewItem sidebarWithViewController:sidebar];
-    side.minimumThickness = side.maximumThickness = width;
-    side.canCollapse = YES;
-    side.allowsFullHeightLayout = YES;   /* macOS 11+ */
-    detailVC = [[NSViewController alloc] init];
-    detailVC.view = [[[NSView alloc] initWithFrame:NSMakeRect(0, 0, content.size.width, content.size.height)] autorelease];
-    [split addSplitViewItem:side];
-    [split addSplitViewItem:[NSSplitViewItem splitViewItemWithViewController:detailVC]];
-
-    delegate = [[W2SSidebarToolbarDelegate alloc] initWithWindow:self];
-    toolbar = [[[NSToolbar alloc] initWithIdentifier:@"org.winehq.w2s.sidebar"] autorelease];
-    [toolbar setDisplayMode:NSToolbarDisplayModeIconOnly];
-    [toolbar setDelegate:delegate];
+    container = [[[NSView alloc] initWithFrame:NSMakeRect(0, 0, NSWidth(content), NSHeight(content))] autorelease];
+    holder = [[[NSView alloc] initWithFrame:NSMakeRect(0, 0, NSWidth(content), NSHeight(content))] autorelease];
 
     [self setStyleMask:[self styleMask] | NSWindowStyleMaskFullSizeContentView];
+    [self setContentView:container];
     [self setToolbar:toolbar];
-    [self setToolbarStyle:NSWindowToolbarStyleUnified];
+    [self setToolbarStyle:[[spec objectForKey:@"style"] integerValue]];
 
+    w2sChrome = YES;
     w2sWineView = wineView;
-    w2sSplit = [split retain];
-    w2sSidebarItem = side;
-    w2sToolbarDelegate = [delegate retain];
-    [split release];
-    [delegate release];
-
-    self.contentViewController = split;
+    w2sLeading = floor(MAX(extra, 0) / 2);
+    w2sTrailing = MAX(extra, 0) - w2sLeading;
 
     /* Size the window around wine's content, then measure the titlebar and
-       toolbar at that size: assigning the content view controller resized
-       the window to the split view's own idea of its size, so measuring
-       before this gives nonsense. */
-    w2sSidebarWidth = w2sLeading = width;
+       toolbar at that size, and size again: wine's content doesn't move. */
     w2sTop = 0;
     [self setFrameAndWineFrame:[self frameRectForContentRect:content]];
-    [self.contentView layoutSubtreeIfNeeded];
+    [container layoutSubtreeIfNeeded];
     w2sTop = w2s_toolbar_height(self);
-    [self setFrameAndWineFrame:[self frameRectForContentRect:content]];  /* wine's content doesn't move */
+    [self setFrameAndWineFrame:[self frameRectForContentRect:content]];
 
-    [self.contentView layoutSubtreeIfNeeded];
-    wineView.frame = NSMakeRect(0, 0, NSWidth(detailVC.view.bounds), NSHeight(detailVC.view.bounds) - w2sTop);
-    wineView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-    [detailVC.view addSubview:wineView];
+    [holder setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+    [wineView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+    [container addSubview:holder];
+    [holder addSubview:wineView];
+    [self w2sLayoutWineView];
     [wineView release];
-    [detailVC release];
-
-    w2s_inset_sidebar(sidebar.view, w2sTop);
-
-    [side addObserver:w2sToolbarDelegate forKeyPath:@"collapsed" options:0 context:NULL];
 
     if (firstResponder == wineView && [wineView acceptsFirstResponder])
         [self makeFirstResponder:wineView];
 }
 
-- (void) w2sAttachSidebar:(NSViewController*)sidebar widthNumber:(NSNumber*)width
-{
-    /* performSelector:with:with: can't pass a CGFloat, so the runtime calls this. */
-    [self w2sAttachSidebar:sidebar width:[width doubleValue]];
-}
-
-- (void) w2sDetachSidebar
+- (void) w2sDetachToolbar
 {
     NSView* wineView;
     NSRect content;
 
     /* Main thread. */
-    if (!w2sSplit) return;
+    if (!w2sChrome) return;
 
-    content = [self contentRectForFrameRect:[self frame]];  /* wine's content, with the sidebar */
-    [w2sSidebarItem removeObserver:w2sToolbarDelegate forKeyPath:@"collapsed"];
-
+    content = [self contentRectForFrameRect:[self frame]];  /* wine's content, with the toolbar */
     wineView = [w2sWineView retain];
     [wineView removeFromSuperview];
-    [wineView setFrame:NSMakeRect(0, 0, content.size.width, content.size.height)];
+    [wineView setFrame:NSMakeRect(0, 0, NSWidth(content), NSHeight(content))];
 
-    self.contentViewController = nil;
-    [self setContentView:wineView];
     [self setToolbar:nil];
+    [self setContentView:wineView];
     [self setStyleMask:[self styleMask] & ~NSWindowStyleMaskFullSizeContentView];
     [wineView release];
 
-    [w2sSplit release];
-    w2sSplit = nil;
-    w2sSidebarItem = nil;
-    [w2sToolbarDelegate release];
-    w2sToolbarDelegate = nil;
+    w2sChrome = NO;
     w2sWineView = nil;
-    w2sLeading = w2sSidebarWidth = w2sTop = 0;
+    w2sLeading = w2sTrailing = w2sTop = 0;
 
     [self setFrameAndWineFrame:[self frameRectForContentRect:content]];
     if ([wineView acceptsFirstResponder])
         [self makeFirstResponder:wineView];
 }
 
-- (void) w2sSidebarCollapsedChanged
+/* the toolbar's items changed: room for them beside wine's content */
+- (void) w2sSetExtraWidth:(NSNumber*)number
 {
+    CGFloat extra = MAX([number doubleValue], 0);
     NSRect content;
 
-    if (!w2sSplit) return;
-    content = [self contentRectForFrameRect:[self frame]];  /* with the OLD w2sLeading */
-    w2sLeading = [w2sSidebarItem isCollapsed] ? 0 : w2sSidebarWidth;
+    if (!w2sChrome || extra == w2sLeading + w2sTrailing) return;
+    content = [self contentRectForFrameRect:[self frame]];  /* with the old margins */
+    w2sLeading = floor(extra / 2);
+    w2sTrailing = extra - w2sLeading;
     [self setFrameAndWineFrame:[self frameRectForContentRect:content]];
+    [self w2sLayoutWineView];
 }
 
-- (void) w2sUpdateSidebarInset
+- (void) w2sChromeChanged
 {
-    if (w2sSplit)
-        w2s_inset_sidebar(w2sSidebarItem.viewController.view, w2sTop);
-}
+    CGFloat top;
 
-- (BOOL) w2sSidebarCollapsed
-{
-    return w2sSidebarItem ? [w2sSidebarItem isCollapsed] : NO;
-}
-
-- (void) w2sSetSidebarCollapsed:(NSNumber*)collapsed
-{
-    if (w2sSplit)
-        [w2sSidebarItem setCollapsed:[collapsed boolValue]];
+    if (!w2sChrome) return;
+    top = NSHeight([self frame]) - NSMaxY([self contentLayoutRect]);
+    if (top > 0 && top < 200) w2sTop = top;
+    [self w2sLayoutWineView];
 }
 
 @end

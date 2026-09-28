@@ -1105,13 +1105,6 @@ static inline BOOL stage_manager_enabled(void)
 
     - (void) dealloc
     {
-        /* MNC Win32-to-SwiftUI: a native sidebar's observer goes before its item */
-        if (w2sSplit)
-        {
-            [w2sSidebarItem removeObserver:w2sToolbarDelegate forKeyPath:@"collapsed"];
-            [w2sSplit release];
-            [w2sToolbarDelegate release];
-        }
         [[[NSWorkspace sharedWorkspace] notificationCenter] removeObserver:self];
         [[NSNotificationCenter defaultCenter] removeObserver:self];
         [queue release];
@@ -1122,24 +1115,24 @@ static inline BOOL stage_manager_enabled(void)
     }
 
     /* MNC Win32-to-SwiftUI: the view wine draws in (mnc_w2s.m). With a native
-       sidebar the window's content is a split view and wine's view sits in
-       its detail pane; otherwise this is the content view. */
+       toolbar the window's content is a container and wine's view sits in it
+       below the toolbar; otherwise this is the content view. */
     - (NSView*) wineContentView
     {
         return w2sWineView ? w2sWineView : [self contentView];
     }
 
-    /* MNC Win32-to-SwiftUI: with a native sidebar, wine's content is the
-       window less the sidebar (left) and the toolbar (top). With
-       NSWindowStyleMaskFullSizeContentView super's content rect equals the
-       frame. */
+    /* MNC Win32-to-SwiftUI: with a native toolbar, wine's content is the
+       window less the titlebar and toolbar (top) and the margins beside it.
+       With NSWindowStyleMaskFullSizeContentView super's content rect equals
+       the frame. */
     - (NSRect) contentRectForFrameRect:(NSRect)frame
     {
         NSRect r = [super contentRectForFrameRect:frame];
-        if (w2sSplit && !([self styleMask] & NSWindowStyleMaskFullScreen))
+        if (w2sChrome && !([self styleMask] & NSWindowStyleMaskFullScreen))
         {
             r.origin.x += w2sLeading;
-            r.size.width -= w2sLeading;
+            r.size.width -= w2sLeading + w2sTrailing;
             r.size.height -= w2sTop;
         }
         return r;
@@ -1147,21 +1140,21 @@ static inline BOOL stage_manager_enabled(void)
 
     - (NSRect) frameRectForContentRect:(NSRect)r
     {
-        if (w2sSplit && !([self styleMask] & NSWindowStyleMaskFullScreen))
+        if (w2sChrome && !([self styleMask] & NSWindowStyleMaskFullScreen))
         {
             r.origin.x -= w2sLeading;
-            r.size.width += w2sLeading;
+            r.size.width += w2sLeading + w2sTrailing;
             r.size.height += w2sTop;
         }
         return [super frameRectForContentRect:r];
     }
 
     /* An AppKit content size for a wine content size: setContentMin/MaxSize:
-       constrain the outer content, which with a sidebar is wider and taller
-       than wine's. */
+       constrain the outer content, which with a native toolbar is taller (and
+       maybe wider) than wine's. */
     - (NSSize) w2sOuterSizeForWineSize:(NSSize)wineSize
     {
-        if (w2sSplit && !([self styleMask] & NSWindowStyleMaskFullScreen))
+        if (w2sChrome && !([self styleMask] & NSWindowStyleMaskFullScreen))
         {
             NSRect outer = [self frameRectForContentRect:NSMakeRect(0, 0, wineSize.width, wineSize.height)];
             return outer.size;
@@ -1292,16 +1285,11 @@ static inline BOOL stage_manager_enabled(void)
         [self adjustFeaturesForState];
         [self setHasShadow:wf->shadow];
 
-        /* MNC Win32-to-SwiftUI: style bits this doesn't manage (like the
-           native sidebar's FullSizeContentView, kept through currentStyle
-           above) survive; a changed titlebar moves the toolbar, so with a
-           sidebar remeasure it. */
-        if (w2sSplit)
-        {
-            CGFloat top = NSHeight([self frame]) - NSMaxY([self contentLayoutRect]);
-            if (top > 0 && top < 200) w2sTop = top;
-            [self w2sUpdateSidebarInset];
-        }
+        /* MNC Win32-to-SwiftUI: style bits this doesn't manage (like a native
+           toolbar's FullSizeContentView, kept through currentStyle above)
+           survive; a changed titlebar moves the toolbar, so remeasure it. */
+        if (w2sChrome)
+            [self w2sChromeChanged];
     }
 
     // Indicates if the window would be visible if the app were not hidden.
@@ -2318,7 +2306,7 @@ static inline BOOL stage_manager_enabled(void)
             style |= NSWindowStyleMaskFullScreen;
         else
             style &= ~NSWindowStyleMaskFullScreen;
-        if (w2sSplit && !isFullscreen)
+        if (w2sChrome && !isFullscreen)
             frame = [self contentRectForFrameRect:frame];
         else
             frame = [[self class] contentRectForFrameRect:frame styleMask:style];
