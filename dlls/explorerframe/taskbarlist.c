@@ -139,12 +139,25 @@ static HRESULT STDMETHODCALLTYPE taskbar_list_MarkFullscreenWindow(ITaskbarList4
 
 /* ITaskbarList3 methods */
 
+/* MNC Win32-to-SwiftUI: the progress on the Dock icon when the native UI is on.
+ * win32swiftui.dll is only loaded (by user32) then. */
+static void w2s_taskbar_progress(HWND hwnd, BOOL set_state, TBPFLAG state, ULONGLONG done, ULONGLONG total)
+{
+    void (WINAPI *pW2STaskbarProgress)(HWND, BOOL, TBPFLAG, ULONGLONG, ULONGLONG);
+    HMODULE module = GetModuleHandleW(L"win32swiftui.dll");
+
+    if (module && (pW2STaskbarProgress = (void *)GetProcAddress(module, "W2STaskbarProgress")))
+        pW2STaskbarProgress(hwnd, set_state, state, done, total);
+}
+
 static HRESULT STDMETHODCALLTYPE taskbar_list_SetProgressValue(ITaskbarList4 *iface,
                                                                HWND hwnd,
                                                                ULONGLONG ullCompleted,
                                                                ULONGLONG ullTotal)
 {
     static BOOL fixme_once;
+
+    w2s_taskbar_progress(hwnd, FALSE, TBPF_NOPROGRESS, ullCompleted, ullTotal);
     if(!fixme_once++) FIXME("iface %p, hwnd %p, ullCompleted %s, ullTotal %s stub!\n", iface, hwnd,
                             wine_dbgstr_longlong(ullCompleted), wine_dbgstr_longlong(ullTotal));
 
@@ -156,6 +169,8 @@ static HRESULT STDMETHODCALLTYPE taskbar_list_SetProgressState(ITaskbarList4 *if
                                                                TBPFLAG tbpFlags)
 {
     static BOOL fixme_once;
+
+    w2s_taskbar_progress(hwnd, TRUE, tbpFlags, 0, 0);
     if(!fixme_once++) FIXME("iface %p, hwnd %p, flags %x stub!\n", iface, hwnd, tbpFlags);
 
     return S_OK;
