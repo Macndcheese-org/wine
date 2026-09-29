@@ -90,6 +90,13 @@
     BOOL w2sChrome;
     NSView* w2sWineView;
     CGFloat w2sLeading, w2sTrailing, w2sTop;
+    /* the full-size content that holds wine's view: the window's content view,
+       or a native sidebar's split view's content item */
+    NSView* w2sContainer;
+    NSSplitViewController* w2sSplit;
+    id w2sSidebarTarget;        /* told w2sSidebarResized: when the user drags the divider */
+    id w2sSidebarObserver;
+    BOOL w2sSidebarSetting;
 }
 
 @property (retain, readonly, nonatomic) WineEventQueue* queue;
@@ -132,6 +139,12 @@
     - (void) w2sSetExtraWidth:(NSNumber*)extra;
     /* after the titlebar changed */
     - (void) w2sChromeChanged;
+    /* spec: "controller" (NSViewController, the sidebar's content), "width" (points),
+       "target" (gets w2sSidebarResized: with the width the user dragged to). The
+       sidebar floats over wine's content, which stays whole underneath (macOS 26+) */
+    - (void) w2sAttachSidebar:(NSDictionary*)spec;
+    - (void) w2sDetachSidebar;
+    - (void) w2sSetSidebarWidth:(NSNumber*)width;
 @end
 
 
