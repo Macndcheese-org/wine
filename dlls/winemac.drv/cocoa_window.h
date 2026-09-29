@@ -143,7 +143,9 @@
     unsigned int message;
     NSRect wineFrame;       /* the control's rectangle */
     CGFloat outsetTop;      /* how far the native control reaches above it */
+    CGFloat outsetLeft, outsetBottom, outsetRight;  /* and beside and below it */
     BOOL behind;            /* below the other native controls (a container) */
+    BOOL front;             /* above them (a view standing for the whole window) */
 }
 
 @property (readonly, nonatomic) uint64_t hwnd;
@@ -154,8 +156,12 @@
     /* for win32swiftui.so (performSelector:, main thread): a group box's title sits
        above its rectangle, and the box stays behind the controls it contains */
     - (void) w2sSetOutsetTop:(NSNumber*)top;
+    /* [top, left, bottom, right]: a settings form covers the whole sheet from its tab control */
+    - (void) w2sSetOutsets:(NSArray*)outsets;
     - (void) w2sSetBehind:(NSNumber*)flag;
     - (BOOL) w2sBehind;
+    - (void) w2sSetFront:(NSNumber*)flag;
+    - (BOOL) w2sFront;
     - (void) w2sApplyFrame:(NSRect)frame;
 
 @end

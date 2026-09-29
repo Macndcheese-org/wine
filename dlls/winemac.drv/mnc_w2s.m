@@ -63,13 +63,15 @@
         return YES;
     }
 
-    /* The control's rectangle, reaching outsetTop above it (the view is flipped,
-       as wine's content view is). */
+    /* The control's rectangle, reaching its outsets beyond it (the view is
+       flipped, as wine's content view is). */
     - (void) w2sApplyFrame:(NSRect)frame
     {
         wineFrame = frame;
+        frame.origin.x -= outsetLeft;
         frame.origin.y -= outsetTop;
-        frame.size.height += outsetTop;
+        frame.size.width += outsetLeft + outsetRight;
+        frame.size.height += outsetTop + outsetBottom;
         if (!NSEqualRects([self frame], frame))
             [self setFrame:frame];
     }
@@ -78,6 +80,35 @@
     {
         outsetTop = MAX(0, [top doubleValue]);
         [self w2sApplyFrame:wineFrame];
+    }
+
+    - (void) w2sSetOutsets:(NSArray*)outsets
+    {
+        if ([outsets count] < 4) return;
+        outsetTop = MAX(0, [[outsets objectAtIndex:0] doubleValue]);
+        outsetLeft = MAX(0, [[outsets objectAtIndex:1] doubleValue]);
+        outsetBottom = MAX(0, [[outsets objectAtIndex:2] doubleValue]);
+        outsetRight = MAX(0, [[outsets objectAtIndex:3] doubleValue]);
+        [self w2sApplyFrame:wineFrame];
+    }
+
+    - (BOOL) w2sFront
+    {
+        return front;
+    }
+
+    - (void) w2sSetFront:(NSNumber*)flag
+    {
+        NSView* superview = [self superview];
+
+        front = [flag boolValue];
+        if (front && superview)
+        {
+            [self retain];
+            [self removeFromSuperview];
+            [superview addSubview:self positioned:NSWindowAbove relativeTo:nil];
+            [self release];
+        }
     }
 
     - (BOOL) w2sBehind
@@ -238,6 +269,10 @@ void macdrv_w2s_set_host_geometry(WineW2SHostView *view, WineWindow *window, CGR
         {
             [view removeFromSuperview];
             [content addSubview:view positioned:([view w2sBehind] ? NSWindowBelow : NSWindowAbove) relativeTo:nil];
+            /* a host in front (a settings form over its sheet) stays above the newcomer */
+            for (NSView* other in [[[content subviews] copy] autorelease])
+                if (other != view && [other isKindOfClass:[WineW2SHostView class]] && [(WineW2SHostView*)other w2sFront])
+                    [(WineW2SHostView*)other w2sSetFront:@YES];
         }
         [view w2sApplyFrame:frame];
         [view setHidden:hidden || !content || NSIsEmptyRect(frame)];
