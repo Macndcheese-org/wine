@@ -97,6 +97,8 @@
     id w2sSidebarTarget;        /* told w2sSidebarResized: when the user drags the divider */
     id w2sSidebarObserver;
     BOOL w2sSidebarSetting;
+    BOOL w2sSidebarCollapsed;
+    NSTimeInterval w2sSidebarToggled;   /* when it was hidden or shown: its animation runs */
 }
 
 @property (retain, readonly, nonatomic) WineEventQueue* queue;

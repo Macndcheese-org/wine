@@ -499,7 +499,7 @@ static CGFloat w2s_toolbar_height(NSWindow* window)
 
     split = [[NSSplitViewController alloc] init];
     sideItem = [NSSplitViewItem sidebarWithViewController:side];
-    [sideItem setCanCollapse:NO];
+    [sideItem setCanCollapse:YES];      /* the toolbar's sidebar button (toggleSidebar:) */
     [sideItem setMinimumThickness:100];
     contentItem = [NSSplitViewItem splitViewItemWithViewController:contentController];
     if (@available(macOS 26.0, *))
@@ -518,9 +518,25 @@ static CGFloat w2s_toolbar_height(NSWindow* window)
     w2sSidebarObserver = [[[NSNotificationCenter defaultCenter]
         addObserverForName:NSSplitViewDidResizeSubviewsNotification object:[split splitView] queue:nil
                 usingBlock:^(NSNotification* note){
-        CGFloat width = NSWidth([[side view] frame]);
+        /* collapsed: 0, the app lays itself out without its tree */
+        BOOL collapsed = [sideItem isCollapsed];
+        CGFloat width = collapsed ? 0 : NSWidth([[side view] frame]);
+        NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+        NSEventType type;
+        BOOL user;
+
         [self w2sLayoutWineView];
-        if (!w2sSidebarSetting && [w2sSidebarTarget respondsToSelector:@selector(w2sSidebarResized:)])
+        /* the user's: the divider dragged (the event is the mouse's drag; the
+           notification names the divider for AppKit's own adjustments too), or the
+           sidebar hidden or shown, until its animation ends */
+        if (collapsed != w2sSidebarCollapsed)
+        {
+            w2sSidebarCollapsed = collapsed;
+            w2sSidebarToggled = now;
+        }
+        type = [[NSApp currentEvent] type];
+        user = type == NSEventTypeLeftMouseDragged || type == NSEventTypeLeftMouseUp || now - w2sSidebarToggled < 1.0;
+        if (user && !w2sSidebarSetting && [w2sSidebarTarget respondsToSelector:@selector(w2sSidebarResized:)])
             [w2sSidebarTarget performSelector:@selector(w2sSidebarResized:) withObject:@(width)];
     }] retain];
 }
@@ -554,10 +570,10 @@ static CGFloat w2s_toolbar_height(NSWindow* window)
     [self w2sDropChromeIfUnused];
 }
 
-/* where the app's layout has the pane beside its tree */
+/* where the app's layout has the pane beside its tree (not while it is hidden) */
 - (void) w2sSetSidebarWidth:(NSNumber*)width
 {
-    if (!w2sSplit || !width) return;
+    if (!w2sSplit || !width || [[[w2sSplit splitViewItems] firstObject] isCollapsed]) return;
     w2sSidebarSetting = YES;
     [[w2sSplit splitView] setPosition:[width doubleValue] ofDividerAtIndex:0];
     w2sSidebarSetting = NO;
