@@ -2399,21 +2399,216 @@ static BOOL w2s_set_results(FileDialogImpl *This, const WCHAR *file)
     return SUCCEEDED(hr);
 }
 
+/* MNC Win32-to-SwiftUI: the app's own controls (IFileDialogCustomize) for
+ * W2SItemDialogEx, which shows them in the panel; win32swiftui's dialogs.c has
+ * the same layout. The controls stay wine's: the panel reads them as they are
+ * and a change made there goes through them, with the app's events. */
+struct w2s_item_entry
+{
+    DWORD id;
+    DWORD state;            /* CDCS_* */
+    const WCHAR *label;
+};
+
+struct w2s_item_control
+{
+    DWORD id;
+    DWORD type;             /* enum ITEMDLG_CCTRL_TYPE */
+    DWORD state;            /* CDCS_* */
+    UINT group;             /* in the visual group at this index + 1; 0: none */
+    const WCHAR *text;      /* its label; an edit box's text */
+    BOOL has_value;
+    DWORD value;            /* a check box's state; a combo box's or radio list's selected item */
+    UINT count;
+    const struct w2s_item_entry *items;
+};
+
+struct w2s_item_custom
+{
+    void *ctx;
+    /* the controls as they are now; valid until the next call */
+    UINT (CALLBACK *controls)(void *ctx, const struct w2s_item_control **list);
+    /* the user changed one: a check box (value: checked), a combo box, radio
+     * list or menu (value: the item's id), a push button, an edit box (text) */
+    void (CALLBACK *changed)(void *ctx, DWORD id, DWORD value, const WCHAR *text);
+};
+
+struct w2s_custom
+{
+    struct w2s_item_custom custom;
+    FileDialogImpl *This;
+    struct w2s_item_control *list;
+    struct w2s_item_entry *items;
+    UINT count;
+};
+
+static void w2s_custom_clear(struct w2s_custom *c)
+{
+    UINT i;
+
+    for (i = 0; i < c->count; i++) free((WCHAR *)c->list[i].text);
+    free(c->list);
+    free(c->items);
+    c->list = NULL;
+    c->items = NULL;
+    c->count = 0;
+}
+
+static WCHAR *w2s_window_text(HWND hwnd)
+{
+    UINT len = GetWindowTextLengthW(hwnd);
+    WCHAR *text = malloc((len + 1) * sizeof(WCHAR));
+
+    text[0] = 0;
+    if (len) GetWindowTextW(hwnd, text, len + 1);
+    return text;
+}
+
+static void w2s_describe(struct w2s_custom *c, customctrl *ctrl, UINT group, UINT *n, UINT *items)
+{
+    struct w2s_item_control *out = &c->list[(*n)++];
+    UINT index = *n;
+    cctrl_item *item;
+    customctrl *sub;
+
+    out->id = ctrl->id;
+    out->type = ctrl->type;
+    out->state = ctrl->cdcstate;
+    out->group = group;
+    out->text = w2s_window_text(ctrl->hwnd);
+    if (ctrl->type == IDLG_CCTRL_MENU && !out->text[0])
+    {
+        /* the label is the toolbar button's until SetControlLabel */
+        UINT len = SendMessageW(ctrl->hwnd, TB_GETBUTTONTEXTW, 1, 0);
+        if (len != -1 && len)
+        {
+            free((WCHAR *)out->text);
+            out->text = malloc((len + 1) * sizeof(WCHAR));
+            SendMessageW(ctrl->hwnd, TB_GETBUTTONTEXTW, 1, (LPARAM)out->text);
+        }
+    }
+    out->items = &c->items[*items];
+    LIST_FOR_EACH_ENTRY(item, &ctrl->sub_items, cctrl_item, entry)
+    {
+        struct w2s_item_entry *e = &c->items[(*items)++];
+        e->id = item->id;
+        e->state = item->cdcstate;
+        e->label = item->label;
+        out->count++;
+        if (ctrl->type == IDLG_CCTRL_RADIOBUTTONLIST && SendMessageW(item->hwnd, BM_GETCHECK, 0, 0) == BST_CHECKED)
+        {
+            out->has_value = TRUE;
+            out->value = item->id;
+        }
+    }
+    if (ctrl->type == IDLG_CCTRL_CHECKBUTTON)
+    {
+        out->has_value = TRUE;
+        out->value = SendMessageW(ctrl->hwnd, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    }
+    else if (ctrl->type == IDLG_CCTRL_COMBOBOX)
+    {
+        LRESULT sel = SendMessageW(ctrl->hwnd, CB_GETCURSEL, 0, 0);
+        if (sel != CB_ERR)
+        {
+            out->has_value = TRUE;
+            out->value = SendMessageW(ctrl->hwnd, CB_GETITEMDATA, sel, 0);
+        }
+    }
+    LIST_FOR_EACH_ENTRY(sub, &ctrl->sub_cctrls, customctrl, sub_cctrls_entry)
+        w2s_describe(c, sub, index, n, items);
+}
+
+static void w2s_count(customctrl *ctrl, UINT *count, UINT *items)
+{
+    customctrl *sub;
+
+    (*count)++;
+    *items += list_count(&ctrl->sub_items);
+    LIST_FOR_EACH_ENTRY(sub, &ctrl->sub_cctrls, customctrl, sub_cctrls_entry)
+        w2s_count(sub, count, items);
+}
+
+static UINT CALLBACK w2s_custom_controls(void *ctx, const struct w2s_item_control **list)
+{
+    struct w2s_custom *c = ctx;
+    UINT count = 0, items = 0, n = 0;
+    customctrl *ctrl;
+
+    w2s_custom_clear(c);
+    LIST_FOR_EACH_ENTRY(ctrl, &c->This->cctrls, customctrl, entry) w2s_count(ctrl, &count, &items);
+    c->list = calloc(count, sizeof(*c->list));
+    c->items = calloc(items + 1, sizeof(*c->items));
+    items = 0;
+    LIST_FOR_EACH_ENTRY(ctrl, &c->This->cctrls, customctrl, entry) w2s_describe(c, ctrl, 0, &n, &items);
+    c->count = n;
+    *list = c->list;
+    return n;
+}
+
+static void CALLBACK w2s_custom_changed(void *ctx, DWORD id, DWORD value, const WCHAR *text)
+{
+    struct w2s_custom *c = ctx;
+    customctrl *ctrl = get_cctrl(c->This, id);
+    cctrl_item *item;
+    UINT i, count;
+
+    TRACE("%p: %lu %lu %s\n", c->This, id, value, debugstr_w(text));
+    if (!ctrl) return;
+    switch (ctrl->type)
+    {
+    case IDLG_CCTRL_CHECKBUTTON:
+        SendMessageW(ctrl->hwnd, BM_SETCHECK, value ? BST_CHECKED : BST_UNCHECKED, 0);
+        cctrl_event_OnCheckButtonToggled(c->This, id, value != 0);
+        break;
+    case IDLG_CCTRL_PUSHBUTTON:
+        cctrl_event_OnButtonClicked(c->This, id);
+        break;
+    case IDLG_CCTRL_COMBOBOX:
+        count = SendMessageW(ctrl->hwnd, CB_GETCOUNT, 0, 0);
+        for (i = 0; i < count && count != CB_ERR; i++)
+            if (SendMessageW(ctrl->hwnd, CB_GETITEMDATA, i, 0) == value) break;
+        if (i == count || count == CB_ERR) return;
+        SendMessageW(ctrl->hwnd, CB_SETCURSEL, i, 0);
+        cctrl_event_OnItemSelected(c->This, id, value);
+        break;
+    case IDLG_CCTRL_RADIOBUTTONLIST:
+        if (!(item = get_item(ctrl, value, 0, NULL))) return;
+        radiobuttonlist_set_selected_item(c->This, ctrl, item);
+        cctrl_event_OnItemSelected(c->This, id, value);
+        break;
+    case IDLG_CCTRL_MENU:
+        cctrl_event_OnControlActivating(c->This, id);
+        cctrl_event_OnItemSelected(c->This, id, value);
+        break;
+    case IDLG_CCTRL_EDITBOX:
+        SendMessageW(ctrl->hwnd, WM_SETTEXT, 0, (LPARAM)(text ? text : L""));
+        break;
+    default:
+        break;
+    }
+}
+
 /* MNC Win32-to-SwiftUI: the macOS open/save panel when the native UI is on.
  * win32swiftui.dll is only loaded (by user32) then; it gets the dialog's state
- * as an OPENFILENAMEW plus its FOS_* options. A dialog with the app's own
- * controls (IFileDialogCustomize) keeps wine's dialog. */
+ * as an OPENFILENAMEW plus its FOS_* options, and the app's own controls. */
 static BOOL w2s_show(FileDialogImpl *This, HWND parent, HRESULT *hr)
 {
     BOOL (WINAPI *pW2SItemDialog)(OPENFILENAMEW *, BOOL, DWORD, BOOL *);
+    BOOL (WINAPI *pW2SItemDialogEx)(OPENFILENAMEW *, BOOL, DWORD, const struct w2s_item_custom *, BOOL *);
     HMODULE module = GetModuleHandleW(L"win32swiftui.dll");
+    struct w2s_custom custom = { { &custom, w2s_custom_controls, w2s_custom_changed }, This };
     OPENFILENAMEW ofn = { sizeof(ofn) };
     WCHAR *filter = NULL, *folder = NULL, *file, *p;
     UINT i, len = 1;
     BOOL handled = FALSE, chosen;
 
     if (!module || !(pW2SItemDialog = (void *)GetProcAddress(module, "W2SItemDialog"))) return FALSE;
-    if (!list_empty(&This->cctrls)) return FALSE;
+    pW2SItemDialogEx = (void *)GetProcAddress(module, "W2SItemDialogEx");
+    /* an older win32swiftui can't show the app's controls; nor an Open button
+     * with a menu (EnableOpenDropDown): a Mac panel's button has none */
+    if (!list_empty(&This->cctrls) && !pW2SItemDialogEx) return FALSE;
+    if (This->hmenu_opendropdown) return FALSE;
 
     for (i = 0; i < This->filterspec_count; i++)
         len += lstrlenW(This->filterspecs[i].pszName) + lstrlenW(This->filterspecs[i].pszSpec) + 2;
@@ -2445,7 +2640,10 @@ static BOOL w2s_show(FileDialogImpl *This, HWND parent, HRESULT *hr)
 
     for (;;)
     {
-        if (!pW2SItemDialog(&ofn, This->dlg_type == ITEMDLG_TYPE_SAVE, This->options, &chosen)) break;
+        if (pW2SItemDialogEx ? !pW2SItemDialogEx(&ofn, This->dlg_type == ITEMDLG_TYPE_SAVE, This->options,
+                                                 list_empty(&This->cctrls) ? NULL : &custom.custom, &chosen)
+                             : !pW2SItemDialog(&ofn, This->dlg_type == ITEMDLG_TYPE_SAVE, This->options, &chosen))
+            break;
         handled = TRUE;
         if (!chosen)
         {
@@ -2465,6 +2663,7 @@ static BOOL w2s_show(FileDialogImpl *This, HWND parent, HRESULT *hr)
         }
         /* the app refused the choice (IFileDialogEvents::OnFileOk): ask again */
     }
+    w2s_custom_clear(&custom);
     free(file);
     free(filter);
     CoTaskMemFree(folder);
