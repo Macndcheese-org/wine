@@ -225,8 +225,11 @@ BOOL macdrv_CreateWindowSurface(HWND hwnd, BOOL layered, const RECT *surface_rec
 
     if (layered)
     {
+        BOOL refeature = !data->ulw_layered;   /* MNC Win32-to-SwiftUI: drawn whole, no title bar */
+
         data->layered = TRUE;
         data->ulw_layered = TRUE;
+        if (refeature && data->cocoa_window) macdrv_refeature_window(data);
     }
 
     *surface = create_surface(hwnd, data->cocoa_window, surface_rect);

@@ -189,6 +189,7 @@ struct macdrv_win_data
     unsigned int        shaped : 1;             /* is window using a custom region shape? */
     unsigned int        layered : 1;            /* is window layered and with valid attributes? */
     unsigned int        ulw_layered : 1;        /* has UpdateLayeredWindow() been called for window? */
+    unsigned int        colorkey_layered : 1;   /* MNC Win32-to-SwiftUI: layered with LWA_COLORKEY */
     unsigned int        per_pixel_alpha : 1;    /* is window using per-pixel alpha? */
     unsigned int        minimized : 1;          /* is window minimized? */
     unsigned int        fullscreen : 1;         /* is the window visible rect fullscreen? (unrelated to native AppKit/Cocoa fullscreen) */
@@ -207,6 +208,7 @@ extern struct macdrv_client_surface *impl_from_client_surface(struct client_surf
 extern BOOL macdrv_client_surface_acquire_metal_swapchain(struct macdrv_client_surface *surface);
 
 extern struct macdrv_win_data *get_win_data(HWND hwnd);
+extern void macdrv_refeature_window(struct macdrv_win_data *data);
 extern void release_win_data(struct macdrv_win_data *data);
 extern void init_win_context(void);
 extern WineWindow *macdrv_get_cocoa_window(HWND hwnd, BOOL require_on_screen);

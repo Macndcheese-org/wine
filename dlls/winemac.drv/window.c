@@ -56,13 +56,23 @@ static BOOL set_window_pos(HWND hwnd, HWND after, INT x, INT y, INT cx, INT cy, 
 }
 
 
-static struct macdrv_window_features get_window_features_for_style(DWORD style, DWORD ex_style, BOOL shaped)
+/* MNC Win32-to-SwiftUI: a layered window see-through as a whole (SetLayeredWindowAttributes
+   with LWA_ALPHA, Notepad++'s Find dialog while inactive) keeps the Mac title bar, as it
+   keeps its frame on Windows; one the app draws whole (UpdateLayeredWindow) or with a
+   color key has none */
+static BOOL layered_drawn_whole(struct macdrv_win_data *data)
+{
+    return data && (data->ulw_layered || data->colorkey_layered);
+}
+
+static struct macdrv_window_features get_window_features_for_style(DWORD style, DWORD ex_style, BOOL shaped,
+                                                                   BOOL drawn_whole)
 {
     struct macdrv_window_features wf = {0};
 
     if (ex_style & WS_EX_NOACTIVATE) wf.prevents_app_activation = TRUE;
 
-    if ((style & WS_CAPTION) == WS_CAPTION && !(ex_style & WS_EX_LAYERED))
+    if ((style & WS_CAPTION) == WS_CAPTION && !((ex_style & WS_EX_LAYERED) && drawn_whole))
     {
         wf.shadow = TRUE;
         if (!shaped)
@@ -95,7 +105,7 @@ static struct macdrv_window_features get_cocoa_window_features(struct macdrv_win
     if (ex_style & WS_EX_NOACTIVATE) wf.prevents_app_activation = TRUE;
     if (EqualRect(&data->rects.window, &data->rects.visible)) return wf;
 
-    return get_window_features_for_style(style, ex_style, data->shaped);
+    return get_window_features_for_style(style, ex_style, data->shaped, layered_drawn_whole(data));
 }
 
 
@@ -282,6 +292,13 @@ static void set_cocoa_window_properties(struct macdrv_win_data *data)
     macdrv_set_cocoa_window_state(data->cocoa_window, &state);
     if (state.minimized_valid)
         data->minimized = state.minimized;
+}
+
+
+/* MNC Win32-to-SwiftUI: the window's frame features again (how it is layered changed) */
+void macdrv_refeature_window(struct macdrv_win_data *data)
+{
+    set_cocoa_window_properties(data);
 }
 
 
@@ -1439,10 +1456,14 @@ void macdrv_SetLayeredWindowAttributes(HWND hwnd, COLORREF key, BYTE alpha, DWOR
 
     if (data)
     {
+        BOOL refeature = data->ulw_layered || data->colorkey_layered != !!(flags & LWA_COLORKEY);
+
         data->layered = TRUE;
         data->ulw_layered = FALSE;
+        data->colorkey_layered = !!(flags & LWA_COLORKEY);
         if (data->cocoa_window)
         {
+            if (refeature) set_cocoa_window_properties(data);   /* MNC Win32-to-SwiftUI: its title bar */
             sync_window_opacity(data, alpha, FALSE, flags);
             /* since layered attributes are now set, can now show the window */
             if ((NtUserGetWindowLongW(hwnd, GWL_STYLE) & WS_VISIBLE) && !data->on_screen)
@@ -1528,14 +1549,15 @@ void macdrv_SetWindowStyle(HWND hwnd, INT offset, STYLESTRUCT *style)
     {
         DWORD changed = style->styleNew ^ style->styleOld;
 
-        set_cocoa_window_properties(data);
-
         if (offset == GWL_EXSTYLE && (changed & WS_EX_LAYERED)) /* changing WS_EX_LAYERED resets attributes */
         {
             data->layered = FALSE;
             data->ulw_layered = FALSE;
+            data->colorkey_layered = FALSE;
             sync_window_opacity(data, 0, FALSE, 0);
         }
+
+        set_cocoa_window_properties(data);
 
         if (offset == GWL_EXSTYLE && (changed & WS_EX_LAYOUTRTL))
             sync_window_region(data, (HRGN)1);
@@ -1763,7 +1785,11 @@ BOOL macdrv_WindowPosChanging(HWND hwnd, UINT swp_flags, BOOL shaped, const stru
  */
 BOOL macdrv_GetWindowStyleMasks(HWND hwnd, UINT style, UINT ex_style, UINT *style_mask, UINT *ex_style_mask)
 {
-    struct macdrv_window_features wf = get_window_features_for_style(style, ex_style, FALSE);
+    struct macdrv_win_data *data = get_win_data(hwnd);
+    struct macdrv_window_features wf = get_window_features_for_style(style, ex_style, FALSE,
+                                                                     layered_drawn_whole(data));
+
+    if (data) release_win_data(data);
 
     *style_mask = ex_style = 0;
     if (wf.title_bar)
