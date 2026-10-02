@@ -163,18 +163,21 @@ WineW2SHostView *macdrv_w2s_host_for_view(NSView *view)
 BOOL macdrv_w2s_event_in_host(NSEvent *event)
 {
     NSWindow* window = [event window];
+    NSView* content;
     NSView* wineView;
     NSView* hit;
 
     if (![window isKindOfClass:[WineWindow class]]) return NO;
-    /* Wine's own view: with a native toolbar that's inside the window's
-       content view, not all of it. */
+    /* Wine's own view: with a native toolbar or sidebar that's inside the
+       window's content view, not all of it. */
     wineView = [(WineWindow*)window wineContentView];
-    if (!wineView || ![wineView superview]) return NO;
-    /* Outside wine's view (the toolbar, the margins beside wine's content):
-       native, it never reaches wine. */
-    hit = [wineView hitTest:[[wineView superview] convertPoint:[event locationInWindow] fromView:nil]];
-    if (!hit) return YES;
+    content = [window contentView];
+    if (!wineView || ![wineView superview] || !content) return NO;
+    /* What the click lands on: anything but wine's view (the sidebar floating
+       over it, the toolbar, the margins beside wine's content) is native, and
+       the click never reaches wine. */
+    hit = [content hitTest:[[content superview] convertPoint:[event locationInWindow] fromView:nil]];
+    if (!hit || (hit != wineView && ![hit isDescendantOf:wineView])) return YES;
     return macdrv_w2s_host_for_view(hit) != nil;
 }
 
@@ -577,11 +580,14 @@ static CGFloat w2s_toolbar_height(NSWindow* window)
 - (void) w2sSetSidebarWidth:(NSNumber*)width
 {
     NSSplitViewItem* sideItem = [[w2sSplit splitViewItems] firstObject];
-    CGFloat actual;
+    CGFloat want = [width doubleValue], actual;
 
     if (!w2sSplit || !width || [sideItem isCollapsed]) return;
+    /* never below the minimum: there AppKit hides the sidebar instead (under
+       half of it) */
+    if ([sideItem minimumThickness] > 0) want = MAX(want, [sideItem minimumThickness]);
     w2sSidebarSetting = YES;
-    [[w2sSplit splitView] setPosition:[width doubleValue] ofDividerAtIndex:0];
+    [[w2sSplit splitView] setPosition:want ofDividerAtIndex:0];
     w2sSidebarSetting = NO;
     actual = NSWidth([[[sideItem viewController] view] frame]);
     if (fabs(actual - [width doubleValue]) > 1 && [w2sSidebarTarget respondsToSelector:@selector(w2sSidebarResized:)])
