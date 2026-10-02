@@ -499,8 +499,10 @@ static CGFloat w2s_toolbar_height(NSWindow* window)
 
     split = [[NSSplitViewController alloc] init];
     sideItem = [NSSplitViewItem sidebarWithViewController:side];
-    [sideItem setCanCollapse:YES];      /* the toolbar's sidebar button (toggleSidebar:) */
-    [sideItem setMinimumThickness:100];
+    /* the toolbar's sidebar button (toggleSidebar:). The sidebar keeps AppKit's
+       minimum width: below about 140 pt, hiding it sent the button to the
+       toolbar's overflow menu instead of beside the traffic lights. */
+    [sideItem setCanCollapse:YES];
     contentItem = [NSSplitViewItem splitViewItemWithViewController:contentController];
     if (@available(macOS 26.0, *))
         [contentItem setAutomaticallyAdjustsSafeAreaInsets:YES];
@@ -570,13 +572,20 @@ static CGFloat w2s_toolbar_height(NSWindow* window)
     [self w2sDropChromeIfUnused];
 }
 
-/* where the app's layout has the pane beside its tree (not while it is hidden) */
+/* where the app's layout has the pane beside its tree (not while it is hidden);
+   narrower than the sidebar's minimum, the app's splitter follows the sidebar */
 - (void) w2sSetSidebarWidth:(NSNumber*)width
 {
-    if (!w2sSplit || !width || [[[w2sSplit splitViewItems] firstObject] isCollapsed]) return;
+    NSSplitViewItem* sideItem = [[w2sSplit splitViewItems] firstObject];
+    CGFloat actual;
+
+    if (!w2sSplit || !width || [sideItem isCollapsed]) return;
     w2sSidebarSetting = YES;
     [[w2sSplit splitView] setPosition:[width doubleValue] ofDividerAtIndex:0];
     w2sSidebarSetting = NO;
+    actual = NSWidth([[[sideItem viewController] view] frame]);
+    if (fabs(actual - [width doubleValue]) > 1 && [w2sSidebarTarget respondsToSelector:@selector(w2sSidebarResized:)])
+        [w2sSidebarTarget performSelector:@selector(w2sSidebarResized:) withObject:@(actual)];
 }
 
 /* the toolbar's items changed: room for them beside wine's content */
