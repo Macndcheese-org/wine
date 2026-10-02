@@ -1255,6 +1255,24 @@ static void w2s_host_detach(struct client_surface *client)
     host->view = NULL;
 }
 
+/* nothing of the control shows: a parent clips it all away (a rebar band hidden,
+   the rebar no higher than 0 pixels, still holds its toolbar) */
+static BOOL w2s_host_clipped_out(HWND hwnd)
+{
+    RECT rect, parent_rect;
+    HWND parent;
+
+    if (!NtUserGetWindowRect(hwnd, &rect, NtUserGetWinMonitorDpi(hwnd, MDT_RAW_DPI))) return FALSE;
+    for (parent = NtUserGetAncestor(hwnd, GA_PARENT); parent && parent != NtUserGetDesktopWindow();
+         parent = NtUserGetAncestor(parent, GA_PARENT))
+    {
+        if (!NtUserGetClientRect(parent, &parent_rect, NtUserGetWinMonitorDpi(parent, MDT_RAW_DPI))) break;
+        NtUserMapWindowPoints(parent, 0, (POINT *)&parent_rect, 2, NtUserGetWinMonitorDpi(parent, MDT_RAW_DPI));
+        if (!intersect_rect(&rect, &rect, &parent_rect)) return TRUE;
+    }
+    return FALSE;
+}
+
 static void w2s_host_update(struct client_surface *client)
 {
     struct macdrv_w2s_host *host = w2s_host_from_client(client);
@@ -1262,7 +1280,7 @@ static void w2s_host_update(struct client_surface *client)
     BOOL hidden;
 
     if (!host->view) return;
-    hidden = !NtUserIsWindowVisible(client->hwnd);
+    hidden = !NtUserIsWindowVisible(client->hwnd) || w2s_host_clipped_out(client->hwnd);
     if (!(data = get_win_data(client->toplevel))) return;
     macdrv_w2s_set_host_geometry(host->view, data->cocoa_window, cgrect_from_rect(client->monitor_rect), hidden);
     release_win_data(data);
