@@ -537,7 +537,8 @@ static WCHAR *title_document(const WCHAR *text, char **file)
 
 /* MNC Win32-to-SwiftUI: "name - App" is "name" on a Mac: a window isn't titled with its
  * app's name (HIG, Toolbars). Only the program's own name counts, the image's file
- * name without ".exe" ("notepad++" for Notepad++), so "Report - Q3" stays as it is.
+ * name without ".exe" ("notepad++" for Notepad++), so "Report - Q3" stays as it is; a
+ * tag in brackets after it ("Notepad++ [Administrator]") goes with it.
  * Returns the length of the title without the suffix, or 0. */
 static size_t title_without_app(const WCHAR *text)
 {
@@ -550,7 +551,7 @@ static size_t title_without_app(const WCHAR *text)
         (name[len - 1] | 32) == 'e')
         len -= 4;
     for (p = text; *p; p++) if (p[0] == ' ' && p[1] == '-' && p[2] == ' ') suffix = p + 3;
-    if (!macdrv_w2s_native_ui() || !suffix || suffix == text + 3 || !len || wcslen(suffix) != len) return 0;
+    if (!macdrv_w2s_native_ui() || !suffix || suffix == text + 3 || !len || wcslen(suffix) < len) return 0;
     for (i = 0; i < len; i++)
     {
         WCHAR a = suffix[i], b = name[i];
@@ -558,6 +559,9 @@ static size_t title_without_app(const WCHAR *text)
         if (b >= 'A' && b <= 'Z') b |= 32;
         if (a != b) return 0;
     }
+    /* "Notepad++ [Administrator]": a tag in brackets, which a Mac title has no use for */
+    p = suffix + len;
+    if (*p && !(p[0] == ' ' && p[1] == '[' && p[wcslen(p) - 1] == ']')) return 0;
     return suffix - 3 - text;
 }
 
