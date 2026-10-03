@@ -92,6 +92,9 @@ typedef struct {
 	int		visible_cols;
 	Entry*	root;
 	Entry*	cur;
+	HWND	hwndTree;	/* MNC Win32-to-SwiftUI: the native tree that stands for the list box */
+	UINT_PTR	tree_sig;
+	BOOL	tree_busy;
 } Pane;
 
 typedef struct {
@@ -114,6 +117,12 @@ typedef struct {
 
 
 static void read_directory(Entry* dir, LPCWSTR path, SORT_ORDER sortOrder, HWND hwnd);
+static BOOL native_tree_wanted(void);
+static void native_tree_create(HWND parent, Pane* pane);
+static void native_tree_sync(ChildWnd* child);
+static LRESULT native_tree_notify(ChildWnd* child, NMHDR* nmhdr);
+static BOOL left_has_focus(ChildWnd* child);
+static HWND left_focus_window(ChildWnd* child);
 static void set_curdir(ChildWnd* child, Entry* entry, int idx, HWND hwnd);
 static void refresh_child(ChildWnd* child);
 static void refresh_drives(void);
@@ -2023,10 +2032,11 @@ static const int g_pos_align[] = {
 
 static void resize_tree(ChildWnd* child, int cx, int cy)
 {
-	HDWP hdwp = BeginDeferWindowPos(4);
+	HDWP hdwp = BeginDeferWindowPos(5);
 	RECT rt;
         WINDOWPOS wp;
         HD_LAYOUT hdl;
+	int full_cy = cy;
 
 	rt.left   = 0;
 	rt.top    = 0;
@@ -2039,11 +2049,15 @@ static void resize_tree(ChildWnd* child, int cx, int cy)
 
         SendMessageW(child->left.hwndHeader, HDM_LAYOUT, 0, (LPARAM)&hdl);
 
-        DeferWindowPos(hdwp, child->left.hwndHeader, wp.hwndInsertAfter,
-                       wp.x-1, wp.y, child->split_pos-SPLIT_WIDTH/2+1, wp.cy, wp.flags);
+        if (!child->left.hwndTree)
+            DeferWindowPos(hdwp, child->left.hwndHeader, wp.hwndInsertAfter,
+                           wp.x-1, wp.y, child->split_pos-SPLIT_WIDTH/2+1, wp.cy, wp.flags);
         DeferWindowPos(hdwp, child->right.hwndHeader, wp.hwndInsertAfter,
                        rt.left+cx+1, wp.y, wp.cx-cx+2, wp.cy, wp.flags);
-	DeferWindowPos(hdwp, child->left.hwnd, 0, rt.left, rt.top, child->split_pos-SPLIT_WIDTH/2-rt.left, rt.bottom-rt.top, SWP_NOZORDER|SWP_NOACTIVATE);
+	if (child->left.hwndTree)	/* the native tree is a sidebar: the window's whole height, no header */
+		DeferWindowPos(hdwp, child->left.hwndTree, 0, rt.left, 0, child->split_pos-SPLIT_WIDTH/2-rt.left, full_cy, SWP_NOZORDER|SWP_NOACTIVATE);
+	else
+		DeferWindowPos(hdwp, child->left.hwnd, 0, rt.left, rt.top, child->split_pos-SPLIT_WIDTH/2-rt.left, rt.bottom-rt.top, SWP_NOZORDER|SWP_NOACTIVATE);
 	DeferWindowPos(hdwp, child->right.hwnd, 0, rt.left+cx+1, rt.top, rt.right-cx, rt.bottom-rt.top, SWP_NOZORDER|SWP_NOACTIVATE);
 
 	EndDeferWindowPos(hdwp);
@@ -2290,7 +2304,8 @@ static int insert_entries(Pane* pane, Entry* dir, LPCWSTR pattern, int filter_fl
 	if (!entry)
 		return idx;
 
-	ShowWindow(pane->hwnd, SW_HIDE);
+	if (!pane->hwndTree)
+		ShowWindow(pane->hwnd, SW_HIDE);
 
 	for(; entry; entry=entry->next) {
 		if (pane->treePane && !(entry->data.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY))
@@ -2345,7 +2360,8 @@ static int insert_entries(Pane* pane, Entry* dir, LPCWSTR pattern, int filter_fl
 			idx = insert_entries(pane, entry->down, pattern, filter_flags, idx);
 	}
 
-	ShowWindow(pane->hwnd, SW_SHOW);
+	if (!pane->hwndTree)
+		ShowWindow(pane->hwnd, SW_SHOW);
 
 	return idx;
 }
@@ -2399,6 +2415,9 @@ static void create_tree_window(HWND parent, Pane* pane, UINT id, UINT id_header,
 	calc_widths(pane, TRUE);
 
 	pane->hwndHeader = create_header(parent, pane, id_header);
+
+	if (pane->treePane && native_tree_wanted())
+		native_tree_create(parent, pane);
 }
 
 
@@ -2406,6 +2425,11 @@ static void InitChildWindow(ChildWnd* child)
 {
 	create_tree_window(child->hwnd, &child->left, IDW_TREE_LEFT, IDW_HEADER_LEFT, NULL, TF_ALL);
 	create_tree_window(child->hwnd, &child->right, IDW_TREE_RIGHT, IDW_HEADER_RIGHT, child->filter_pattern, child->filter_flags);
+
+	if (child->left.hwndTree) {
+		native_tree_sync(child);
+		SetTimer(child->hwnd, 1, 100, NULL);
+	}
 }
 
 
@@ -2995,7 +3019,8 @@ static void collapse_entry(Pane* pane, Entry* dir)
         if (!dir) return;
         idx = SendMessageW(pane->hwnd, LB_FINDSTRING, 0, (LPARAM)dir);
 
-	ShowWindow(pane->hwnd, SW_HIDE);
+	if (!pane->hwndTree)
+		ShowWindow(pane->hwnd, SW_HIDE);
 
 	/* hide sub entries */
 	for(;;) {
@@ -3010,7 +3035,8 @@ static void collapse_entry(Pane* pane, Entry* dir)
 
 	dir->expanded = FALSE;
 
-	ShowWindow(pane->hwnd, SW_SHOW);
+	if (!pane->hwndTree)
+		ShowWindow(pane->hwnd, SW_SHOW);
 }
 
 
@@ -3442,6 +3468,318 @@ static HRESULT ShellFolderContextMenu(IShellFolder* shell_folder, HWND hwndParen
 	return FAILED(hr)? hr: executed? S_OK: S_FALSE;
 }
 
+
+/* MNC Win32-to-SwiftUI: with the native UI on, the folder tree is a system tree view, which the
+ * runtime makes the window's sidebar; it is drawn from the list box (still the model, and hidden)
+ * and its clicks go to the list box's code. A Mac sidebar has no double-click to open a folder
+ * and no header, so the list box's way of working (and its column header) is not shown. */
+#define IDW_TREE_NATIVE 7
+
+static BOOL native_tree_wanted(void)
+{
+	return GetModuleHandleW(L"win32swiftui.dll") != NULL;
+}
+
+static BOOL left_has_focus(ChildWnd* child)
+{
+	HWND focus = GetFocus();
+
+	return focus == child->left.hwnd || (child->left.hwndTree && focus == child->left.hwndTree);
+}
+
+static HWND left_focus_window(ChildWnd* child)
+{
+	return child->left.hwndTree ? child->left.hwndTree : child->left.hwnd;
+}
+
+static void native_tree_create(HWND parent, Pane* pane)
+{
+	SHFILEINFOW info;
+	HIMAGELIST images;
+
+	pane->hwndTree = CreateWindowW(WC_TREEVIEWW, L"", WS_CHILD|WS_VISIBLE|WS_TABSTOP|TVS_HASBUTTONS|
+	                               TVS_SHOWSELALWAYS|TVS_DISABLEDRAGDROP, 0, 0, 0, 0, parent,
+	                               (HMENU)ULongToHandle(IDW_TREE_NATIVE), Globals.hInstance, 0);
+	if (!pane->hwndTree)
+		return;
+
+	SendMessageW(pane->hwndTree, WM_SETFONT, (WPARAM)Globals.hfont, FALSE);
+	images = (HIMAGELIST)SHGetFileInfoW(L"folder", FILE_ATTRIBUTE_DIRECTORY, &info, sizeof(info),
+	                                    SHGFI_SYSICONINDEX|SHGFI_SMALLICON|SHGFI_USEFILEATTRIBUTES);
+	if (images)
+		SendMessageW(pane->hwndTree, TVM_SETIMAGELIST, TVSIL_NORMAL, (LPARAM)images);
+
+	/* the list box that is the model stays, unseen */
+	ShowWindow(pane->hwnd, SW_HIDE);
+	ShowWindow(pane->hwndHeader, SW_HIDE);
+}
+
+static BOOL native_tree_is_dir(const Entry* entry)
+{
+	if (!(entry->data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+		return FALSE;
+
+	return !(entry->data.cFileName[0] == '.' &&
+	         (entry->data.cFileName[1] == '\0' || (entry->data.cFileName[1] == '.' && entry->data.cFileName[2] == '\0')));
+}
+
+static BOOL native_tree_has_folders(const Entry* entry)
+{
+	/* a folder that was not read yet may have some: the disclosure shows, and reads it */
+	if (!entry->scanned)
+		return TRUE;
+
+	for (entry = entry->down; entry; entry = entry->next)
+		if (native_tree_is_dir(entry))
+			return TRUE;
+
+	return FALSE;
+}
+
+static int native_tree_icon(ChildWnd* child, const Entry* entry, int *root_icon)
+{
+	SHFILEINFOW info;
+	WCHAR path[MAX_PATH];
+
+	if (entry == &child->root.entry) {
+		if (*root_icon < 0) {
+			get_path(&child->root.entry, path);
+			*root_icon = SHGetFileInfoW(path, 0, &info, sizeof(info), SHGFI_SYSICONINDEX|SHGFI_SMALLICON) ?
+			             info.iIcon : -2;
+		}
+		if (*root_icon >= 0)
+			return *root_icon;
+	}
+
+	if (!SHGetFileInfoW(L"folder", FILE_ATTRIBUTE_DIRECTORY, &info, sizeof(info),
+	                    SHGFI_SYSICONINDEX|SHGFI_SMALLICON|SHGFI_USEFILEATTRIBUTES))
+		return 0;
+
+	return info.iIcon;
+}
+
+static LPARAM native_tree_param(HWND tree, HTREEITEM item)
+{
+	TVITEMW it;
+
+	it.mask = TVIF_PARAM;
+	it.hItem = item;
+	it.lParam = 0;
+	SendMessageW(tree, TVM_GETITEMW, 0, (LPARAM)&it);
+	return it.lParam;
+}
+
+static HTREEITEM native_tree_find(HWND tree, HTREEITEM item, const Entry* entry)
+{
+	for (; item; item = (HTREEITEM)SendMessageW(tree, TVM_GETNEXTITEM, TVGN_NEXT, (LPARAM)item)) {
+		HTREEITEM found;
+
+		if ((const Entry*)native_tree_param(tree, item) == entry)
+			return item;
+
+		found = native_tree_find(tree, (HTREEITEM)SendMessageW(tree, TVM_GETNEXTITEM, TVGN_CHILD, (LPARAM)item), entry);
+		if (found)
+			return found;
+	}
+
+	return NULL;
+}
+
+/* make the children of parent the folders in the list entry..., keeping the items that are
+ * still right (so the sidebar keeps its scroll position and its open folders) */
+static void native_tree_reconcile(ChildWnd* child, HTREEITEM parent, Entry* first, int *root_icon)
+{
+	HWND tree = child->left.hwndTree;
+	HTREEITEM item, next, prev = TVI_FIRST;
+	Entry* entry;
+
+	/* items for folders that are gone */
+	for (item = (HTREEITEM)SendMessageW(tree, TVM_GETNEXTITEM, TVGN_CHILD, parent == TVI_ROOT ? 0 : (LPARAM)parent); item; item = next) {
+		const Entry* known = (const Entry*)native_tree_param(tree, item);
+
+		next = (HTREEITEM)SendMessageW(tree, TVM_GETNEXTITEM, TVGN_NEXT, (LPARAM)item);
+		for (entry = first; entry; entry = entry->next)
+			if (entry == known && native_tree_is_dir(entry))
+				break;
+		if (!entry)
+			SendMessageW(tree, TVM_DELETEITEM, 0, (LPARAM)item);
+	}
+
+	for (entry = first; entry; entry = entry->next) {
+		TVITEMW it;
+		HTREEITEM mine;
+
+		if (!native_tree_is_dir(entry))
+			continue;
+
+		item = (HTREEITEM)SendMessageW(tree, TVM_GETNEXTITEM, prev == TVI_FIRST ? TVGN_CHILD : TVGN_NEXT,
+		                               prev != TVI_FIRST ? (LPARAM)prev : parent == TVI_ROOT ? 0 : (LPARAM)parent);
+		if (item && (const Entry*)native_tree_param(tree, item) != entry) {
+			/* out of order: put it where it belongs */
+			SendMessageW(tree, TVM_DELETEITEM, 0, (LPARAM)item);
+			item = NULL;
+		}
+
+		if (!item) {
+			TVINSERTSTRUCTW ins;
+
+			memset(&ins, 0, sizeof(ins));
+			ins.hParent = parent;
+			ins.hInsertAfter = prev;
+			ins.item.mask = TVIF_TEXT|TVIF_PARAM|TVIF_IMAGE|TVIF_SELECTEDIMAGE|TVIF_CHILDREN;
+			ins.item.pszText = entry->data.cFileName;
+			ins.item.lParam = (LPARAM)entry;
+			ins.item.iImage = ins.item.iSelectedImage = native_tree_icon(child, entry, root_icon);
+			ins.item.cChildren = native_tree_has_folders(entry) ? 1 : 0;
+			item = (HTREEITEM)SendMessageW(tree, TVM_INSERTITEMW, 0, (LPARAM)&ins);
+			if (!item)
+				continue;
+		} else {
+			it.mask = TVIF_HANDLE|TVIF_CHILDREN;
+			it.hItem = item;
+			it.cChildren = native_tree_has_folders(entry) ? 1 : 0;
+			SendMessageW(tree, TVM_SETITEMW, 0, (LPARAM)&it);
+		}
+		prev = mine = item;
+
+		if (entry->expanded) {
+			native_tree_reconcile(child, mine, entry->down, root_icon);
+			SendMessageW(tree, TVM_EXPAND, TVE_EXPAND, (LPARAM)mine);
+		} else {
+			SendMessageW(tree, TVM_EXPAND, TVE_COLLAPSE|TVE_COLLAPSERESET, (LPARAM)mine);
+		}
+	}
+}
+
+/* follow the list box: draw the tree again where it is not what the list box holds */
+static void native_tree_sync(ChildWnd* child)
+{
+	Pane* pane = &child->left;
+	int i, count, root_icon = -1;
+	UINT_PTR sig;
+	HTREEITEM item;
+
+	if (!pane->hwndTree || pane->tree_busy)
+		return;
+
+	count = SendMessageW(pane->hwnd, LB_GETCOUNT, 0, 0);
+	sig = count;
+
+	for (i = 0; i < count; i++) {
+		Entry* entry = (Entry*)SendMessageW(pane->hwnd, LB_GETITEMDATA, i, 0);
+		const WCHAR* name;
+
+		sig = sig * 131 + (UINT_PTR)entry;
+		if (!entry)
+			continue;
+
+		sig = sig * 131 + entry->expanded + 2 * entry->scanned + 4 * (entry->down != NULL);
+		for (name = entry->data.cFileName; *name; name++)
+			sig = sig * 31 + *name;
+	}
+
+	pane->tree_busy = TRUE;
+	if (sig != pane->tree_sig || !SendMessageW(pane->hwndTree, TVM_GETCOUNT, 0, 0)) {
+		pane->tree_sig = sig;
+		SendMessageW(pane->hwndTree, WM_SETREDRAW, FALSE, 0);
+		native_tree_reconcile(child, TVI_ROOT, &child->root.entry, &root_icon);
+		SendMessageW(pane->hwndTree, WM_SETREDRAW, TRUE, 0);
+	}
+
+	/* the folder shown on the right is the selected one */
+	item = (HTREEITEM)SendMessageW(pane->hwndTree, TVM_GETNEXTITEM, TVGN_CARET, 0);
+	if (pane->cur && (!item || (Entry*)native_tree_param(pane->hwndTree, item) != pane->cur)) {
+		item = native_tree_find(pane->hwndTree, (HTREEITEM)SendMessageW(pane->hwndTree, TVM_GETNEXTITEM, TVGN_ROOT, 0), pane->cur);
+		if (item)
+			SendMessageW(pane->hwndTree, TVM_SELECTITEM, TVGN_CARET, (LPARAM)item);
+	}
+	pane->tree_busy = FALSE;
+}
+
+/* the list box's own selection of a folder, as a click on it does */
+static void native_tree_select(ChildWnd* child, Entry* entry)
+{
+	int idx = SendMessageW(child->left.hwnd, LB_FINDSTRING, 0, (LPARAM)entry);
+
+	if (idx == LB_ERR)
+		return;
+
+	SendMessageW(child->left.hwnd, LB_SETCURSEL, idx, 0);
+	set_curdir(child, entry, idx, child->hwnd);
+}
+
+static void native_tree_expand(ChildWnd* child, Entry* entry, BOOL expand)
+{
+	Entry* up;
+
+	if (expand) {
+		if (!entry->scanned) {
+			/* the folder's content, without showing it in the list on the right (it is not selected) */
+			WCHAR path[MAX_PATH];
+
+			free_entries(entry);
+			if (entry->etype == ET_SHELL)
+				read_directory(entry, NULL, child->sortOrder, child->hwnd);
+			else {
+				get_path(entry, path);
+				read_directory(entry, path, child->sortOrder, child->hwnd);
+			}
+		}
+		expand_entry(child, entry);
+		return;
+	}
+
+	collapse_entry(&child->left, entry);
+
+	/* the selected folder was inside: the collapsed one is the selection, as in the Finder */
+	for (up = child->left.cur; up; up = up->up)
+		if (up == entry) {
+			native_tree_select(child, entry);
+			break;
+		}
+}
+
+static LRESULT native_tree_notify(ChildWnd* child, NMHDR* nmhdr)
+{
+	NMTREEVIEWW* nm = (NMTREEVIEWW*)nmhdr;
+	Pane* pane = &child->left;
+
+	if (pane->tree_busy)
+		return 0;
+
+	/* the tree is drawn again a moment after the list changes: not an entry that is gone */
+	if ((nmhdr->code == TVN_SELCHANGEDW || nmhdr->code == TVN_ITEMEXPANDINGW) &&
+	    (!nm->itemNew.lParam || SendMessageW(pane->hwnd, LB_FINDSTRING, 0, nm->itemNew.lParam) == LB_ERR))
+		return 0;
+
+	switch (nmhdr->code) {
+		case TVN_SELCHANGEDW: {
+			Entry* entry = (Entry*)nm->itemNew.lParam;
+
+			if (entry && entry != pane->cur)
+				native_tree_select(child, entry);
+			PostMessageW(child->hwnd, WM_APP, 0, 0);
+			break;}
+
+		case TVN_ITEMEXPANDINGW: {
+			Entry* entry = (Entry*)nm->itemNew.lParam;
+
+			if (!entry || (nm->action != TVE_EXPAND && nm->action != TVE_COLLAPSE))
+				break;
+
+			/* the list box is the model: change it, then draw the tree again from it */
+			native_tree_expand(child, entry, nm->action == TVE_EXPAND);
+			PostMessageW(child->hwnd, WM_APP, 0, 0);
+			return TRUE;}
+
+		case NM_SETFOCUS:
+			child->focus_pane = 0;
+			break;
+	}
+
+	return 0;
+}
+
 static LRESULT CALLBACK ChildWndProc(HWND hwnd, UINT nmsg, WPARAM wparam, LPARAM lparam)
 {
 	ChildWnd* child = (ChildWnd*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
@@ -3463,6 +3801,11 @@ static LRESULT CALLBACK ChildWndProc(HWND hwnd, UINT nmsg, WPARAM wparam, LPARAM
 
 		case WM_CREATE:
 			InitChildWindow(child);
+			break;
+
+		case WM_TIMER:
+		case WM_APP:
+			native_tree_sync(child);
 			break;
 
 		case WM_NCDESTROY:
@@ -3560,11 +3903,11 @@ static LRESULT CALLBACK ChildWndProc(HWND hwnd, UINT nmsg, WPARAM wparam, LPARAM
 		case WM_SETFOCUS:
 			if (SetCurrentDirectoryW(child->path))
 				set_space_status();
-			SetFocus(child->focus_pane? child->right.hwnd: child->left.hwnd);
+			SetFocus(child->focus_pane? child->right.hwnd: left_focus_window(child));
 			break;
 
 		case WM_DISPATCH_COMMAND: {
-			Pane* pane = GetFocus()==child->left.hwnd? &child->left: &child->right;
+			Pane* pane = left_has_focus(child)? &child->left: &child->right;
 
 			switch(LOWORD(wparam)) {
 				case ID_WINDOW_NEW: {
@@ -3670,7 +4013,7 @@ static LRESULT CALLBACK ChildWndProc(HWND hwnd, UINT nmsg, WPARAM wparam, LPARAM
 			return TRUE;}
 
 		case WM_COMMAND: {
-			Pane* pane = GetFocus()==child->left.hwnd? &child->left: &child->right;
+			Pane* pane = left_has_focus(child)? &child->left: &child->right;
 
 			switch(HIWORD(wparam)) {
 				case LBN_SELCHANGE: {
@@ -3691,6 +4034,8 @@ static LRESULT CALLBACK ChildWndProc(HWND hwnd, UINT nmsg, WPARAM wparam, LPARAM
 
 		case WM_NOTIFY: {
 			NMHDR* pnmh = (NMHDR*) lparam;
+			if (pnmh->idFrom == IDW_TREE_NATIVE)
+				return native_tree_notify(child, pnmh);
 			return pane_notify(pnmh->idFrom==IDW_HEADER_LEFT? &child->left: &child->right, pnmh);}
 
 		case WM_CONTEXTMENU: {
@@ -3700,6 +4045,9 @@ static LRESULT CALLBACK ChildWndProc(HWND hwnd, UINT nmsg, WPARAM wparam, LPARAM
 
 			 /* first select the current item in the listbox */
 			HWND hpanel = (HWND) wparam;
+
+			if (hpanel == child->left.hwndTree)
+				break;
 			pt_clnt.x = pt.x = (short)LOWORD(lparam);
 			pt_clnt.y = pt.y = (short)HIWORD(lparam);
 			ScreenToClient(hpanel, &pt_clnt);
@@ -3707,7 +4055,7 @@ static LRESULT CALLBACK ChildWndProc(HWND hwnd, UINT nmsg, WPARAM wparam, LPARAM
 			SendMessageW(hpanel, WM_LBUTTONUP, 0, MAKELONG(pt_clnt.x, pt_clnt.y));
 
 			 /* now create the popup menu using shell namespace and IContextMenu */
-			pane = GetFocus()==child->left.hwnd? &child->left: &child->right;
+			pane = left_has_focus(child)? &child->left: &child->right;
 			idx = SendMessageW(pane->hwnd, LB_GETCURSEL, 0, 0);
 
 			if (idx != -1) {
@@ -3791,7 +4139,7 @@ static LRESULT CALLBACK TreeWndProc(HWND hwnd, UINT nmsg, WPARAM wparam, LPARAM 
 		case WM_KEYDOWN:
 			if (wparam == VK_TAB) {
 				/*TODO: SetFocus(Globals.hdrivebar) */
-				SetFocus(child->focus_pane? child->left.hwnd: child->right.hwnd);
+				SetFocus(child->focus_pane? left_focus_window(child): child->right.hwnd);
 			}
 	}
 
