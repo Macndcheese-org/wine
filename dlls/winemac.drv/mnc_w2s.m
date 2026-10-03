@@ -618,4 +618,61 @@ static CGFloat w2s_toolbar_height(NSWindow* window)
     [self w2sLayoutWineView];
 }
 
+static BOOL w2s_native_ui;
+
++ (void) w2sNativeUIOn
+{
+    if (w2s_native_ui) return;
+    w2s_native_ui = TRUE;
+    /* the windows titled before */
+    for (NSWindow* window in [NSApp windows])
+    {
+        BOOL edited;
+        NSString* title;
+
+        if (![window isKindOfClass:[WineWindow class]]) continue;
+        title = macdrv_w2s_window_title([window title], &edited);
+        if (!edited) continue;
+        [window setTitle:title];
+        [window setDocumentEdited:YES];
+        if ([window isVisible] && ![window isExcludedFromWindowsMenu])
+            [NSApp changeWindowsItem:window title:title filename:NO];
+    }
+}
+
 @end
+
+/***********************************************************************
+ *              macdrv_w2s_window_title
+ *
+ * A Win32 window's title as its Mac window shows it. The mark a Win32 app
+ * puts in its title for unsaved changes ("*name - App", "name* - App",
+ * "name*") is the dot in a Mac window's close button instead (HIG, Windows).
+ * Only with the native UI on; the Win32 title (GetWindowText) keeps it.
+ */
+NSString *macdrv_w2s_window_title(NSString *title, BOOL *edited)
+{
+    NSUInteger length = [title length];
+    NSRange dash;
+
+    *edited = FALSE;
+    if (!w2s_native_ui || length < 2) return title;
+    if ([title characterAtIndex:0] == '*')
+    {
+        *edited = TRUE;
+        return [[title substringFromIndex:1] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    }
+    dash = [title rangeOfString:@" - "];
+    if (dash.location == NSNotFound) dash = [title rangeOfString:@" \u2014 "];
+    if (dash.location != NSNotFound && dash.location > 1 && [title characterAtIndex:dash.location - 1] == '*')
+    {
+        *edited = TRUE;
+        return [title stringByReplacingCharactersInRange:NSMakeRange(dash.location - 1, 1) withString:@""];
+    }
+    if ([title characterAtIndex:length - 1] == '*')
+    {
+        *edited = TRUE;
+        return [[title substringToIndex:length - 1] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    }
+    return title;
+}
