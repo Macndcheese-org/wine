@@ -119,6 +119,7 @@ typedef struct {
 static void read_directory(Entry* dir, LPCWSTR path, SORT_ORDER sortOrder, HWND hwnd);
 static BOOL native_tree_wanted(void);
 static int native_tree_width(void);
+static HIMAGELIST native_tree_images(void);
 static void native_tree_create(HWND parent, Pane* pane);
 static void native_tree_sync(ChildWnd* child);
 static LRESULT native_tree_notify(ChildWnd* child, NMHDR* nmhdr);
@@ -2699,13 +2700,13 @@ static void draw_item(Pane* pane, LPDRAWITEMSTRUCT dis, Entry* entry, int calcWi
 		if (attrs & FILE_ATTRIBUTE_COMPRESSED)
 			textcolor = COLOR_COMPRESSED;
 		else
-			textcolor = RGB(0,0,0);
+			textcolor = GetSysColor(COLOR_WINDOWTEXT);
 
 		if (dis->itemState & ODS_FOCUS) {
-			textcolor = RGB(255,255,255);
-			bkcolor = COLOR_SELECTION;
+			textcolor = GetSysColor(COLOR_HIGHLIGHTTEXT);
+			bkcolor = GetSysColor(COLOR_HIGHLIGHT);
 		} else {
-			bkcolor = RGB(255,255,255);
+			bkcolor = GetSysColor(COLOR_WINDOW);
 		}
 
 		hbrush = CreateSolidBrush(bkcolor);
@@ -3508,7 +3509,6 @@ static HWND left_focus_window(ChildWnd* child)
 
 static void native_tree_create(HWND parent, Pane* pane)
 {
-	SHFILEINFOW info;
 	HIMAGELIST images;
 
 	pane->hwndTree = CreateWindowW(WC_TREEVIEWW, L"", WS_CHILD|WS_VISIBLE|WS_TABSTOP|TVS_HASBUTTONS|
@@ -3518,8 +3518,7 @@ static void native_tree_create(HWND parent, Pane* pane)
 		return;
 
 	SendMessageW(pane->hwndTree, WM_SETFONT, (WPARAM)Globals.hfont, FALSE);
-	images = (HIMAGELIST)SHGetFileInfoW(L"folder", FILE_ATTRIBUTE_DIRECTORY, &info, sizeof(info),
-	                                    SHGFI_SYSICONINDEX|SHGFI_SMALLICON|SHGFI_USEFILEATTRIBUTES);
+	images = native_tree_images();
 	if (images)
 		SendMessageW(pane->hwndTree, TVM_SETIMAGELIST, TVSIL_NORMAL, (LPARAM)images);
 
@@ -3550,26 +3549,68 @@ static BOOL native_tree_has_folders(const Entry* entry)
 	return FALSE;
 }
 
+/* The pictures of the tree are the program's own (the folder of images.bmp, centred in a square
+ * cell), and, for the entries that have one, the icon the shell gave them: the same pictures the
+ * list on the right draws. */
+static HIMAGELIST g_tree_images;
+static int g_tree_folder;
+static int g_tree_added;
+
+static HIMAGELIST native_tree_images(void)
+{
+	HDC screen, dc, mdc;
+	HBITMAP color, mask;
+	HGDIOBJ old_color, old_mask;
+	RECT rc;
+	int cx;
+
+	if (g_tree_images || !Globals.himl)
+		return g_tree_images;
+
+	cx = GetSystemMetrics(SM_CXSMICON);
+	g_tree_images = ImageList_Create(cx, cx, ILC_COLOR32|ILC_MASK, 16, 16);
+	if (!g_tree_images)
+		return NULL;
+
+	screen = GetDC(NULL);
+	dc = CreateCompatibleDC(screen);
+	mdc = CreateCompatibleDC(screen);
+	color = CreateCompatibleBitmap(screen, cx, cx);
+	mask = CreateBitmap(cx, cx, 1, 1, NULL);
+	old_color = SelectObject(dc, color);
+	old_mask = SelectObject(mdc, mask);
+	SetRect(&rc, 0, 0, cx, cx);
+	FillRect(dc, &rc, GetStockObject(BLACK_BRUSH));
+	PatBlt(mdc, 0, 0, cx, cx, WHITENESS);
+	ImageList_Draw(Globals.himl, IMG_FOLDER, dc, (cx - IMAGE_WIDTH) / 2, (cx - IMAGE_HEIGHT) / 2, ILD_NORMAL);
+	ImageList_Draw(Globals.himl, IMG_FOLDER, mdc, (cx - IMAGE_WIDTH) / 2, (cx - IMAGE_HEIGHT) / 2, ILD_MASK);
+	SelectObject(dc, old_color);
+	SelectObject(mdc, old_mask);
+	g_tree_folder = ImageList_Add(g_tree_images, color, mask);
+	DeleteObject(color);
+	DeleteObject(mask);
+	DeleteDC(dc);
+	DeleteDC(mdc);
+	ReleaseDC(NULL, screen);
+	return g_tree_images;
+}
+
 static int native_tree_icon(ChildWnd* child, const Entry* entry, int *root_icon)
 {
-	SHFILEINFOW info;
-	WCHAR path[MAX_PATH];
+	int idx;
 
-	if (entry == &child->root.entry) {
-		if (*root_icon < 0) {
-			get_path(&child->root.entry, path);
-			*root_icon = SHGetFileInfoW(path, 0, &info, sizeof(info), SHGFI_SYSICONINDEX|SHGFI_SMALLICON) ?
-			             info.iIcon : -2;
-		}
-		if (*root_icon >= 0)
-			return *root_icon;
-	}
-
-	if (!SHGetFileInfoW(L"folder", FILE_ATTRIBUTE_DIRECTORY, &info, sizeof(info),
-	                    SHGFI_SYSICONINDEX|SHGFI_SMALLICON|SHGFI_USEFILEATTRIBUTES))
+	if (!native_tree_images())
 		return 0;
 
-	return info.iIcon;
+	if (entry->hicon && entry->hicon != (HICON)-1 && g_tree_added < 500) {
+		idx = ImageList_AddIcon(g_tree_images, entry->hicon);
+		if (idx >= 0) {
+			g_tree_added++;
+			return idx;
+		}
+	}
+
+	return g_tree_folder;
 }
 
 static LPARAM native_tree_param(HWND tree, HTREEITEM item)
@@ -4368,6 +4409,8 @@ static BOOL show_frame(HWND hwndParent, int cmdshow, LPWSTR path)
 
 	ShowWindow(Globals.hMainWnd, cmdshow);
 
+	Globals.himl = load_image_list();
+
 	 /* Shell Namespace as default: */
 	child = alloc_child_window(path, get_path_pidl(path,Globals.hMainWnd), Globals.hMainWnd);
 
@@ -4383,8 +4426,6 @@ static BOOL show_frame(HWND hwndParent, int cmdshow, LPWSTR path)
 	}
 
 	SetWindowPlacement(child->hwnd, &child->pos);
-
-	Globals.himl = load_image_list();
 
 	Globals.prescan_node = FALSE;
 
