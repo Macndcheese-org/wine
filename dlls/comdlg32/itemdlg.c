@@ -2425,12 +2425,17 @@ struct w2s_item_control
 
 struct w2s_item_custom
 {
+    UINT size;              /* sizeof, for what later versions add */
     void *ctx;
     /* the controls as they are now; valid until the next call */
     UINT (CALLBACK *controls)(void *ctx, const struct w2s_item_control **list);
     /* the user changed one: a check box (value: checked), a combo box, radio
      * list or menu (value: the item's id), a push button, an edit box (text) */
     void (CALLBACK *changed)(void *ctx, DWORD id, DWORD value, const WCHAR *text);
+    /* the user picked another file type (from 1); name: the file name the panel shows then */
+    void (CALLBACK *type_changed)(void *ctx, UINT index, const WCHAR *name);
+    /* the file name as the dialog has it now (the app's IFileDialog::SetFileName), or NULL */
+    const WCHAR *(CALLBACK *file_name)(void *ctx);
 };
 
 struct w2s_custom
@@ -2589,6 +2594,27 @@ static void CALLBACK w2s_custom_changed(void *ctx, DWORD id, DWORD value, const 
     }
 }
 
+static void CALLBACK w2s_custom_type_changed(void *ctx, UINT index, const WCHAR *name)
+{
+    struct w2s_custom *c = ctx;
+    FileDialogImpl *This = c->This;
+
+    TRACE("%p: type %u, %s\n", This, index, debugstr_w(name));
+    if (index && index <= This->filterspec_count) This->filetypeindex = index - 1;
+    if (name)
+    {
+        /* what GetFileName answers in the app's OnTypeChange */
+        LocalFree(This->set_filename);
+        This->set_filename = StrDupW(name);
+    }
+    events_OnTypeChange(This);
+}
+
+static const WCHAR * CALLBACK w2s_custom_file_name(void *ctx)
+{
+    return ((struct w2s_custom *)ctx)->This->set_filename;
+}
+
 /* MNC Win32-to-SwiftUI: the macOS open/save panel when the native UI is on.
  * win32swiftui.dll is only loaded (by user32) then; it gets the dialog's state
  * as an OPENFILENAMEW plus its FOS_* options, and the app's own controls. */
@@ -2597,7 +2623,8 @@ static BOOL w2s_show(FileDialogImpl *This, HWND parent, HRESULT *hr)
     BOOL (WINAPI *pW2SItemDialog)(OPENFILENAMEW *, BOOL, DWORD, BOOL *);
     BOOL (WINAPI *pW2SItemDialogEx)(OPENFILENAMEW *, BOOL, DWORD, const struct w2s_item_custom *, BOOL *);
     HMODULE module = GetModuleHandleW(L"win32swiftui.dll");
-    struct w2s_custom custom = { { &custom, w2s_custom_controls, w2s_custom_changed }, This };
+    struct w2s_custom custom = { { sizeof(custom.custom), &custom, w2s_custom_controls, w2s_custom_changed,
+                                   w2s_custom_type_changed, w2s_custom_file_name }, This };
     OPENFILENAMEW ofn = { sizeof(ofn) };
     WCHAR *filter = NULL, *folder = NULL, *file, *p;
     UINT i, len = 1;
@@ -2641,7 +2668,7 @@ static BOOL w2s_show(FileDialogImpl *This, HWND parent, HRESULT *hr)
     for (;;)
     {
         if (pW2SItemDialogEx ? !pW2SItemDialogEx(&ofn, This->dlg_type == ITEMDLG_TYPE_SAVE, This->options,
-                                                 list_empty(&This->cctrls) ? NULL : &custom.custom, &chosen)
+                                                 &custom.custom, &chosen)
                              : !pW2SItemDialog(&ofn, This->dlg_type == ITEMDLG_TYPE_SAVE, This->options, &chosen))
             break;
         handled = TRUE;
@@ -2655,6 +2682,13 @@ static BOOL w2s_show(FileDialogImpl *This, HWND parent, HRESULT *hr)
         {
             *hr = E_FAIL;
             break;
+        }
+        if (!file[lstrlenW(file) + 1])
+        {
+            /* GetFileName in the app's OnFileOk: the chosen file's */
+            const WCHAR *name = wcsrchr(file, '\\');
+            LocalFree(This->set_filename);
+            This->set_filename = StrDupW(name ? name + 1 : file);
         }
         if (events_OnFileOk(This) == S_OK)
         {
