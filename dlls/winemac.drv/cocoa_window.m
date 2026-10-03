@@ -3526,9 +3526,13 @@ void macdrv_set_cocoa_window_title(WineWindow *window, const unsigned short* tit
     else
         titleString = @"";
     OnMainThreadAsync(^{
-        [window setTitle:titleString];
+        BOOL edited;
+        NSString* shown = macdrv_w2s_window_title(titleString, &edited);
+
+        [window setTitle:shown];
+        [window setDocumentEdited:edited];
         if ([window isOrderedIn] && ![window isExcludedFromWindowsMenu])
-            [NSApp changeWindowsItem:window title:titleString filename:NO];
+            [NSApp changeWindowsItem:window title:shown filename:NO];
     });
 }
 }
