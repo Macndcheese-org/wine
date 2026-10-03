@@ -177,8 +177,10 @@ void ME_MakeFirstParagraph(ME_TextEditor *editor, HDC hdc)
   
   cf.dwEffects = CFE_AUTOCOLOR | CFE_AUTOBACKCOLOR;
   lstrcpyW(cf.szFaceName, lf.lfFaceName);
-  /* Convert system font height from logical units to twips for cf.yHeight */
-  cf.yHeight = (lf.lfHeight * 72 * 1440) / (c.dpi.cy * c.dpi.cy);
+  /* Convert system font height from logical units to twips for cf.yHeight.
+   * MNC: the 72/96 is the factor the old formula had at 96 DPI; dividing by the DPI
+   * twice halved the default size at 192 DPI (4 pt text in a Retina-mode Wordpad). */
+  cf.yHeight = (lf.lfHeight * 72 * 1440) / (c.dpi.cy * 96);
   if (lf.lfWeight > FW_NORMAL) cf.dwEffects |= CFE_BOLD;
   cf.wWeight = lf.lfWeight;
   if (lf.lfItalic) cf.dwEffects |= CFE_ITALIC;
