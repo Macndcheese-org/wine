@@ -401,7 +401,9 @@ static NSString* WineLocalizedString(unsigned int stringID)
             // CrossOver Hack 10912: Mac Edit menu
             [self changeEditMenuKeyEquivalentsForWindow:[NSApp keyWindow]];
 
-            [NSApp setApplicationIconImage:self.applicationIcon];
+            /* MNC: a program without an icon has the Mac's generic app icon, not the
+               executable's (a black "exec" square) */
+            [NSApp setApplicationIconImage:self.applicationIcon ?: [[NSWorkspace sharedWorkspace] iconForFileType:@"com.apple.application-bundle"]];
         }
     }
 
@@ -1185,9 +1187,19 @@ static NSString* WineLocalizedString(unsigned int stringID)
                 [nsimage setSize:bestSize];
             else
                 nsimage = nil;
+
+            /* MNC: the icon as a Mac app's: on the rounded square of the icon grid */
+            if (nsimage)
+            {
+                NSImage* styled = macdrv_mac_style_app_icon(images);
+                if (styled) nsimage = styled;
+            }
         }
 
         self.applicationIcon = nsimage;
+        /* the Dock may already show the process: the icon arrives with its first window */
+        if ([NSApp activationPolicy] == NSApplicationActivationPolicyRegular && nsimage)
+            [NSApp setApplicationIconImage:nsimage];
     }
 
     - (void) handleCommandTab

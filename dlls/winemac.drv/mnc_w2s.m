@@ -681,3 +681,163 @@ NSString *macdrv_w2s_window_title(NSString *title, BOOL *edited)
     }
     return title;
 }
+
+
+/***********************************************************************
+ *              Application icon (MNC)
+ *
+ * A Windows program's icon is a picture of any shape; a Mac app's icon is a
+ * rounded square on the icon grid (HIG, App icons): a 1024 canvas with an 824
+ * square body, and a soft shadow under it. The program's biggest icon goes on a
+ * white rounded square of that shape. An icon that already fills its square
+ * (its edges are opaque) is clipped to the shape; any other is fitted inside,
+ * with a margin, so its drawing isn't cut. The idea (CrossOver's, cocoa_icon_utils.m)
+ * is theirs; this one draws the shape itself, so it needs no resource, and fits a
+ * drawing by what it draws rather than by its canvas.
+ */
+
+/* The share of a frame along the icon's edges that is not transparent, and the box its
+   drawing fills (in unit coordinates of the image, y up). An icon whose edges are all
+   opaque is a picture that fills its square; any other is a drawing on nothing. */
+static double mnc_icon_analyze(CGImageRef image, CGRect *box)
+{
+    enum { N = 256, FRAME = 12 };       /* the frame is about 5% of the width */
+    CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
+    uint8_t *data = calloc(N * N * 4, 1);
+    CGContextRef ctx;
+    size_t filled = 0, total = 0, x, y, minx = N, miny = N, maxx = 0, maxy = 0;
+
+    *box = CGRectMake(0, 0, 1, 1);
+    if (!data) { CGColorSpaceRelease(space); return 0; }
+    ctx = CGBitmapContextCreate(data, N, N, 8, N * 4, space, kCGImageAlphaPremultipliedLast);
+    CGColorSpaceRelease(space);
+    if (!ctx) { free(data); return 0; }
+    CGContextSetInterpolationQuality(ctx, kCGInterpolationMedium);
+    CGContextDrawImage(ctx, CGRectMake(0, 0, N, N), image);
+    for (y = 0; y < N; y++)
+        for (x = 0; x < N; x++)
+        {
+            BOOL on = data[(y * N + x) * 4 + 3] > 25;
+            if (on)
+            {
+                /* row 0 of the data is the top of the image */
+                size_t up = N - 1 - y;
+                if (x < minx) minx = x;
+                if (x > maxx) maxx = x;
+                if (up < miny) miny = up;
+                if (up > maxy) maxy = up;
+            }
+            if (x >= FRAME && x < N - FRAME && y >= FRAME && y < N - FRAME) continue;
+            total++;
+            if (on) filled++;
+        }
+    CGContextRelease(ctx);
+    free(data);
+    if (maxx >= minx && maxy >= miny)
+        *box = CGRectMake(minx / (double)N, miny / (double)N, (maxx - minx + 1) / (double)N, (maxy - miny + 1) / (double)N);
+    return total ? filled / (double)total : 0;
+}
+
+/* the icon grid's rounded square: a superellipse of exponent 4.35, which is how close the
+   continuous-corner shape of macOS icons is to one (measured on the system's own icons at
+   1024: the contour is within 1.3 pixels, rms, of this) */
+static CGPathRef mnc_icon_shape(CGRect rect)
+{
+    enum { POINTS = 720 };
+    CGMutablePathRef path = CGPathCreateMutable();
+    CGFloat cx = CGRectGetMidX(rect), cy = CGRectGetMidY(rect), a = rect.size.width / 2, b = rect.size.height / 2;
+    int i;
+
+    for (i = 0; i < POINTS; i++)
+    {
+        double t = 2 * M_PI * i / POINTS, c = cos(t), s = sin(t);
+        CGFloat x = cx + a * (c < 0 ? -1 : 1) * pow(fabs(c), 2.0 / 4.35), y = cy + b * (s < 0 ? -1 : 1) * pow(fabs(s), 2.0 / 4.35);
+        if (!i) CGPathMoveToPoint(path, NULL, x, y); else CGPathAddLineToPoint(path, NULL, x, y);
+    }
+    CGPathCloseSubpath(path);
+    return path;
+}
+
+NSImage *macdrv_mac_style_app_icon(NSArray *images)
+{
+    static const CGFloat canvas = 1024, body = 824, margin = 80;
+    CGImageRef icon = NULL;
+    CGColorSpaceRef space;
+    CGContextRef ctx;
+    CGRect bodyRect, fitted, box;
+    CGPathRef shape;
+    CGImageRef result;
+    NSBitmapImageRep *rep;
+    NSImage *image;
+    double coverage, scale;
+    id candidate;
+
+    for (candidate in images)
+    {
+        CGImageRef cg = (CGImageRef)candidate;
+        if (!icon || MAX(CGImageGetWidth(cg), CGImageGetHeight(cg)) > MAX(CGImageGetWidth(icon), CGImageGetHeight(icon)))
+            icon = cg;
+    }
+    if (!icon || !CGImageGetWidth(icon) || !CGImageGetHeight(icon)) return nil;
+
+    space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    ctx = CGBitmapContextCreate(NULL, canvas, canvas, 8, 0, space, kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
+    CGColorSpaceRelease(space);
+    if (!ctx) return nil;
+
+    bodyRect = CGRectMake((canvas - body) / 2, (canvas - body) / 2, body, body);
+    shape = mnc_icon_shape(bodyRect);
+
+    /* the white square, with its shadow */
+    CGContextSaveGState(ctx);
+    {
+        CGColorRef shadow = CGColorCreateGenericGray(0, 0.3);
+        CGContextSetShadowWithColor(ctx, CGSizeMake(0, -8), 22, shadow);
+        CGColorRelease(shadow);
+    }
+    CGContextAddPath(ctx, shape);
+    CGContextSetRGBFillColor(ctx, 1, 1, 1, 1);
+    CGContextFillPath(ctx);
+    CGContextRestoreGState(ctx);
+
+    /* the icon on it, inside the shape: a picture that fills its square fills the body;
+       a drawing is fitted into the body less a margin, by what it draws, so that none of
+       it is cut by a corner */
+    coverage = mnc_icon_analyze(icon, &box);
+    {
+        CGFloat w = CGImageGetWidth(icon), h = CGImageGetHeight(icon);
+        if (coverage >= 0.9)
+        {
+            scale = MIN(bodyRect.size.width / w, bodyRect.size.height / h);
+            fitted = CGRectMake(CGRectGetMidX(bodyRect) - w * scale / 2, CGRectGetMidY(bodyRect) - h * scale / 2, w * scale, h * scale);
+        }
+        else
+        {
+            CGRect target = CGRectInset(bodyRect, margin, margin);
+            CGFloat bw = box.size.width * w, bh = box.size.height * h;
+            scale = MIN(target.size.width / bw, target.size.height / bh);
+            fitted = CGRectMake(CGRectGetMidX(target) - (box.origin.x + box.size.width / 2) * w * scale,
+                                CGRectGetMidY(target) - (box.origin.y + box.size.height / 2) * h * scale, w * scale, h * scale);
+        }
+    }
+    CGContextSaveGState(ctx);
+    CGContextAddPath(ctx, shape);
+    CGContextClip(ctx);
+    CGContextSetInterpolationQuality(ctx, kCGInterpolationHigh);
+    CGContextDrawImage(ctx, fitted, icon);
+    CGContextRestoreGState(ctx);
+    CGPathRelease(shape);
+
+    result = CGBitmapContextCreateImage(ctx);
+    CGContextRelease(ctx);
+    if (!result) return nil;
+    rep = [[NSBitmapImageRep alloc] initWithCGImage:result];
+    CGImageRelease(result);
+    if (!rep) return nil;
+    /* 1024 pixels shown at 512 points: sharp on a Retina Dock */
+    [rep setSize:NSMakeSize(canvas / 2, canvas / 2)];
+    image = [[[NSImage alloc] initWithSize:NSMakeSize(canvas / 2, canvas / 2)] autorelease];
+    [image addRepresentation:rep];
+    [rep release];
+    return image;
+}
