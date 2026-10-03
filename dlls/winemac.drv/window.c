@@ -482,6 +482,106 @@ static void sync_window_min_max_info(HWND hwnd)
 }
 
 
+/* MNC Win32-to-SwiftUI: a window titled by a file's path ("Z:\dir\name.txt - App",
+ * Notepad++'s) is a document window on a Mac: its title is the file's name, and
+ * the path is the window's represented file (the icon in the title bar, whose
+ * menu shows the folders). Only with the native UI on, and only for a path that
+ * names something: the longest part of the title, up to a " - ", that does.
+ * Returns the title for the Mac window (free), and the file's Unix path (free). */
+static WCHAR *title_document(const WCHAR *text, char **file)
+{
+    const WCHAR *start = text, *ends[9], *p, *name;
+    unsigned int count = 0;
+
+    *file = NULL;
+    if (!macdrv_w2s_native_ui()) return NULL;
+    if (*start == '*') start++;       /* unsaved changes: "*name - App" */
+    if (!(((start[0] >= 'A' && start[0] <= 'Z') || (start[0] >= 'a' && start[0] <= 'z')) &&
+          start[1] == ':' && start[2] == '\\') && !(start[0] == '\\' && start[1] == '\\'))
+        return NULL;
+    for (p = start; *p && count < 8; p++)
+        if (p[0] == ' ' && p[1] == '-' && p[2] == ' ') ends[count++] = p;
+    ends[count++] = start + wcslen(start);
+
+    while (count--)
+    {
+        size_t end = ends[count] - start, len, namelen;
+        WCHAR *path, *title;
+        char *unix_name;
+
+        if (end > 1 && start[end - 1] == '*') end--;       /* "name* - App" */
+        len = end;
+        path = malloc((len + 1) * sizeof(WCHAR));
+        memcpy(path, start, len * sizeof(WCHAR));
+        path[len] = 0;
+        while (len && path[len - 1] == '\\') path[--len] = 0;
+        for (name = path, p = path; *p; p++)
+            if (*p == '\\') name = p + 1;
+        namelen = wcslen(name);
+        for (p = name; *p && *p != ':'; p++) ;
+        if (!namelen || *p || ntdll_get_unix_file_name(path, &unix_name, FILE_OPEN))
+        {
+            free(path);
+            continue;
+        }
+        title = malloc((wcslen(text) + 1) * sizeof(WCHAR));
+        memcpy(title, text, (start - text) * sizeof(WCHAR));
+        memcpy(title + (start - text), name, namelen * sizeof(WCHAR));
+        memcpy(title + (start - text) + namelen, start + end, (wcslen(start + end) + 1) * sizeof(WCHAR));
+        free(path);
+        *file = unix_name;
+        return title;
+    }
+    return NULL;
+}
+
+/* MNC Win32-to-SwiftUI: "name - App" is "name" on a Mac: a window isn't titled with its
+ * app's name (HIG, Toolbars). Only the program's own name counts, the image's file
+ * name without ".exe" ("notepad++" for Notepad++), so "Report - Q3" stays as it is.
+ * Returns the length of the title without the suffix, or 0. */
+static size_t title_without_app(const WCHAR *text)
+{
+    const WCHAR *image = RtlGetCurrentPeb()->ProcessParameters->ImagePathName.Buffer, *p, *name = image, *suffix = NULL;
+    size_t len, i;
+
+    for (p = image; *p; p++) if (*p == '\\' || *p == '/') name = p + 1;
+    len = wcslen(name);
+    if (len > 4 && name[len - 4] == '.' && (name[len - 3] | 32) == 'e' && (name[len - 2] | 32) == 'x' &&
+        (name[len - 1] | 32) == 'e')
+        len -= 4;
+    for (p = text; *p; p++) if (p[0] == ' ' && p[1] == '-' && p[2] == ' ') suffix = p + 3;
+    if (!macdrv_w2s_native_ui() || !suffix || suffix == text + 3 || !len || wcslen(suffix) != len) return 0;
+    for (i = 0; i < len; i++)
+    {
+        WCHAR a = suffix[i], b = name[i];
+        if (a >= 'A' && a <= 'Z') a |= 32;
+        if (b >= 'A' && b <= 'Z') b |= 32;
+        if (a != b) return 0;
+    }
+    return suffix - 3 - text;
+}
+
+static void set_cocoa_window_text(WineWindow *win, const WCHAR *text)
+{
+    char *file;
+    WCHAR *shorter = NULL, *document;
+    size_t keep = title_without_app(text);
+
+    if (keep)
+    {
+        shorter = malloc((keep + 1) * sizeof(WCHAR));
+        memcpy(shorter, text, keep * sizeof(WCHAR));
+        shorter[keep] = 0;
+        text = shorter;
+    }
+    document = title_document(text, &file);
+    macdrv_set_cocoa_window_title(win, document ? document : text, wcslen(document ? document : text), file);
+    free(document);
+    free(shorter);
+    free(file);
+}
+
+
 /**********************************************************************
  *              create_cocoa_window
  *
@@ -527,7 +627,7 @@ static void create_cocoa_window(struct macdrv_win_data *data)
 
     /* set the window text */
     if (!NtUserInternalGetWindowText(data->hwnd, text, ARRAY_SIZE(text))) text[0] = 0;
-    macdrv_set_cocoa_window_title(data->cocoa_window, text, wcslen(text));
+    set_cocoa_window_text(data->cocoa_window, text);
 
     /* set the window region */
     if (win_rgn || IsRectEmpty(&data->rects.window)) sync_window_region(data, win_rgn);
@@ -1614,7 +1714,7 @@ void macdrv_SetWindowText(HWND hwnd, LPCWSTR text)
     TRACE("%p, %s\n", hwnd, debugstr_w(text));
 
     if ((win = macdrv_get_cocoa_window(hwnd, FALSE)))
-        macdrv_set_cocoa_window_title(win, text, wcslen(text));
+        set_cocoa_window_text(win, text);
 }
 
 

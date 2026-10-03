@@ -3515,11 +3515,13 @@ void macdrv_set_cocoa_window_state(WineWindow *window,
  * Set a Cocoa window's title.
  */
 void macdrv_set_cocoa_window_title(WineWindow *window, const unsigned short* title,
-        size_t length)
+        size_t length, const char* file)
 {
 @autoreleasepool
 {
     NSString* titleString;
+    /* the file the window is a document of (a Unix path), or "" */
+    NSString* path = file ? [[NSFileManager defaultManager] stringWithFileSystemRepresentation:file length:strlen(file)] : @"";
 
     if (title)
         titleString = [NSString stringWithCharacters:title length:length];
@@ -3529,6 +3531,9 @@ void macdrv_set_cocoa_window_title(WineWindow *window, const unsigned short* tit
         BOOL edited;
         NSString* shown = macdrv_w2s_window_title(titleString, &edited);
 
+        /* before the title: setting the file may title the window with its name */
+        if (![[window representedFilename] isEqualToString:path])
+            [window setRepresentedFilename:path];
         [window setTitle:shown];
         [window setDocumentEdited:edited];
         if ([window isOrderedIn] && ![window isExcludedFromWindowsMenu])

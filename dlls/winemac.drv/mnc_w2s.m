@@ -642,6 +642,11 @@ static BOOL w2s_native_ui;
 
 @end
 
+bool macdrv_w2s_native_ui(void)
+{
+    return w2s_native_ui;
+}
+
 /***********************************************************************
  *              macdrv_w2s_window_title
  *

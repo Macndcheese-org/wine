@@ -556,7 +556,8 @@ extern void macdrv_set_cocoa_window_features(WineWindow *window,
 extern void macdrv_set_cocoa_window_state(WineWindow *window,
         const struct macdrv_window_state* state);
 extern void macdrv_set_cocoa_window_title(WineWindow *window, const UniChar* title,
-        size_t length);
+        size_t length, const char* file);
+extern bool macdrv_w2s_native_ui(void);
 extern void macdrv_order_cocoa_window(WineWindow *window, WineWindow *prev,
         WineWindow *next, bool activate);
 extern void macdrv_hide_cocoa_window(WineWindow *window);
