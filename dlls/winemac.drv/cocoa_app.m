@@ -113,6 +113,16 @@ static NSString* WineLocalizedString(unsigned int stringID)
 @end
 
 
+/* MNC: whether the process runs from an app bundle that has an icon (a stub made for the program,
+   tools/app_stub.py): the system draws that icon, in the user's icon style (Liquid Glass, clear,
+   tinted), and the program's own image must not replace it. */
+static BOOL mnc_bundle_has_icon(void)
+{
+    NSBundle* bundle = [NSBundle mainBundle];
+    return [[bundle bundlePath] hasSuffix:@".app"] &&
+           ([bundle objectForInfoDictionaryKey:@"CFBundleIconFile"] || [bundle objectForInfoDictionaryKey:@"CFBundleIconName"]);
+}
+
 @implementation WineApplicationController
 
     @synthesize keyboardType, lastFlagsChanged;
@@ -403,7 +413,8 @@ static NSString* WineLocalizedString(unsigned int stringID)
 
             /* MNC: a program without an icon has the Mac's generic app icon, not the
                executable's (a black "exec" square) */
-            [NSApp setApplicationIconImage:self.applicationIcon ?: [[NSWorkspace sharedWorkspace] iconForFileType:@"com.apple.application-bundle"]];
+            if (!mnc_bundle_has_icon())
+                [NSApp setApplicationIconImage:self.applicationIcon ?: [[NSWorkspace sharedWorkspace] iconForFileType:@"com.apple.application-bundle"]];
         }
     }
 
@@ -1196,6 +1207,7 @@ static NSString* WineLocalizedString(unsigned int stringID)
             }
         }
 
+        if (mnc_bundle_has_icon()) return;
         self.applicationIcon = nsimage;
         /* the Dock may already show the process: the icon arrives with its first window */
         if ([NSApp activationPolicy] == NSApplicationActivationPolicyRegular && nsimage)
