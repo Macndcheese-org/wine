@@ -33,8 +33,9 @@ enum IMAGE {
     IMG_FOLDER_UP,  IMG_FOLDER_CUR
 };
 
-#define IMAGE_WIDTH         16
-#define IMAGE_HEIGHT        13
+/* MNC Win32-to-SwiftUI: the pictures are drawn Globals.image_scale times larger on a high-DPI screen */
+#define IMAGE_WIDTH         (16 * Globals.image_scale)
+#define IMAGE_HEIGHT        (13 * Globals.image_scale)
 #define SPLIT_WIDTH         5
 #define TREE_LINE_DX        3
 
@@ -86,6 +87,7 @@ typedef struct
   WCHAR     num_sep;
   SIZE      spaceSize;
   HIMAGELIST himl;
+  int       image_scale;
 
   WCHAR     drives[BUFFER_LEN];
   BOOL      prescan_node;   /*TODO*/

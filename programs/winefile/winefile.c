@@ -118,6 +118,7 @@ typedef struct {
 
 static void read_directory(Entry* dir, LPCWSTR path, SORT_ORDER sortOrder, HWND hwnd);
 static BOOL native_tree_wanted(void);
+static int native_tree_width(void);
 static void native_tree_create(HWND parent, Pane* pane);
 static void native_tree_sync(ChildWnd* child);
 static LRESULT native_tree_notify(ChildWnd* child, NMHDR* nmhdr);
@@ -1075,7 +1076,7 @@ static ChildWnd* alloc_child_window(LPCWSTR path, LPITEMIDLIST pidl, HWND hwnd)
 	child->pos.rcNormalPosition.bottom = CW_USEDEFAULT;
 
 	child->focus_pane = 0;
-	child->split_pos = DEFAULT_SPLIT_POS;
+	child->split_pos = native_tree_wanted() ? native_tree_width() : DEFAULT_SPLIT_POS;
 	child->sortOrder = SORT_NAME;
 	child->header_wdths_ok = FALSE;
 
@@ -3063,9 +3064,12 @@ static void set_curdir(ChildWnd* child, Entry* entry, int idx, HWND hwnd)
 	child->right.root = entry->down? entry->down: entry;
 	child->right.cur = entry;
 
-	if (!entry->scanned)
+	if (!entry->scanned) {
 		scan_entry(child, entry, idx, hwnd);
-	else
+		/* the folder's content is known now: the right pane starts at it, not at the folder
+		 * and the ones after it (what it was while there was nothing below the folder) */
+		child->right.root = entry->down? entry->down: entry;
+	} else
 		refresh_right_pane(child);
 
 	get_path(entry, path);
@@ -3480,6 +3484,16 @@ static BOOL native_tree_wanted(void)
 	return GetModuleHandleW(L"win32swiftui.dll") != NULL;
 }
 
+/* a Mac sidebar is about 215 points wide: that many pixels at 96 DPI, twice as many at 192 */
+static int native_tree_width(void)
+{
+	HDC hdc = GetDC(0);
+	int width = MulDiv(215, GetDeviceCaps(hdc, LOGPIXELSX), 96);
+
+	ReleaseDC(0, hdc);
+	return width;
+}
+
 static BOOL left_has_focus(ChildWnd* child)
 {
 	HWND focus = GetFocus();
@@ -3608,6 +3622,7 @@ static void native_tree_reconcile(ChildWnd* child, HTREEITEM parent, Entry* firs
 	for (entry = first; entry; entry = entry->next) {
 		TVITEMW it;
 		HTREEITEM mine;
+		BOOL open;
 
 		if (!native_tree_is_dir(entry))
 			continue;
@@ -3642,10 +3657,12 @@ static void native_tree_reconcile(ChildWnd* child, HTREEITEM parent, Entry* firs
 		}
 		prev = mine = item;
 
+		open = (SendMessageW(tree, TVM_GETITEMSTATE, (WPARAM)mine, TVIS_EXPANDED) & TVIS_EXPANDED) != 0;
 		if (entry->expanded) {
 			native_tree_reconcile(child, mine, entry->down, root_icon);
-			SendMessageW(tree, TVM_EXPAND, TVE_EXPAND, (LPARAM)mine);
-		} else {
+			if (!open)
+				SendMessageW(tree, TVM_EXPAND, TVE_EXPAND, (LPARAM)mine);
+		} else if (open || SendMessageW(tree, TVM_GETNEXTITEM, TVGN_CHILD, (LPARAM)mine)) {
 			SendMessageW(tree, TVM_EXPAND, TVE_COLLAPSE|TVE_COLLAPSERESET, (LPARAM)mine);
 		}
 	}
@@ -3767,10 +3784,23 @@ static LRESULT native_tree_notify(ChildWnd* child, NMHDR* nmhdr)
 			if (!entry || (nm->action != TVE_EXPAND && nm->action != TVE_COLLAPSE))
 				break;
 
-			/* the list box is the model: change it, then draw the tree again from it */
+			/* the list box is the model: change it; the tree (which goes on to open or close the
+			 * folder) gets the folders found now, as an app fills a node in this notification */
 			native_tree_expand(child, entry, nm->action == TVE_EXPAND);
+			if (nm->action == TVE_EXPAND) {
+				TVITEMW it;
+				int root_icon = -1;
+
+				pane->tree_busy = TRUE;
+				native_tree_reconcile(child, nm->itemNew.hItem, entry->down, &root_icon);
+				it.mask = TVIF_HANDLE|TVIF_CHILDREN;
+				it.hItem = nm->itemNew.hItem;
+				it.cChildren = native_tree_has_folders(entry) ? 1 : 0;
+				SendMessageW(pane->hwndTree, TVM_SETITEMW, 0, (LPARAM)&it);
+				pane->tree_busy = FALSE;
+			}
 			PostMessageW(child->hwnd, WM_APP, 0, 0);
-			return TRUE;}
+			break;}
 
 		case NM_SETFOCUS:
 			child->focus_pane = 0;
@@ -4147,6 +4177,48 @@ static LRESULT CALLBACK TreeWndProc(HWND hwnd, UINT nmsg, WPARAM wparam, LPARAM 
 }
 
 
+/* MNC Win32-to-SwiftUI: the pictures (16x13, made for 96 DPI) are drawn larger on a high-DPI
+ * screen, in step with the text, as nearest-neighbour copies so that they stay sharp */
+static HIMAGELIST load_image_list(void)
+{
+	HBITMAP bmp, scaled;
+	HIMAGELIST himl;
+	BITMAP bm;
+	HDC screen, src_dc, dst_dc;
+	HGDIOBJ old_src, old_dst;
+	int s = Globals.image_scale;
+
+	if (s <= 1)
+		return ImageList_LoadImageW(Globals.hInstance, MAKEINTRESOURCEW(IDB_IMAGES), 16, 0, RGB(0,255,0), IMAGE_BITMAP, 0);
+
+	bmp = LoadImageW(Globals.hInstance, MAKEINTRESOURCEW(IDB_IMAGES), IMAGE_BITMAP, 0, 0, LR_CREATEDIBSECTION);
+	if (!bmp)
+		return NULL;
+
+	GetObjectW(bmp, sizeof(bm), &bm);
+	screen = GetDC(NULL);
+	src_dc = CreateCompatibleDC(screen);
+	dst_dc = CreateCompatibleDC(screen);
+	scaled = CreateCompatibleBitmap(screen, bm.bmWidth * s, bm.bmHeight * s);
+	old_src = SelectObject(src_dc, bmp);
+	old_dst = SelectObject(dst_dc, scaled);
+	SetStretchBltMode(dst_dc, COLORONCOLOR);
+	StretchBlt(dst_dc, 0, 0, bm.bmWidth * s, bm.bmHeight * s, src_dc, 0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
+	SelectObject(src_dc, old_src);
+	SelectObject(dst_dc, old_dst);
+
+	himl = ImageList_Create(16 * s, bm.bmHeight * s, ILC_COLOR24|ILC_MASK, bm.bmWidth / 16, 1);
+	if (himl)
+		ImageList_AddMasked(himl, scaled, RGB(0,255,0));
+
+	DeleteDC(src_dc);
+	DeleteDC(dst_dc);
+	ReleaseDC(NULL, screen);
+	DeleteObject(scaled);
+	DeleteObject(bmp);
+	return himl;
+}
+
 static void InitInstance(HINSTANCE hinstance)
 {
 	WNDCLASSEXW wcFrame;
@@ -4161,6 +4233,8 @@ static void InitInstance(HINSTANCE hinstance)
 	HDC hdc = GetDC(0);
 
 	setlocale(LC_COLLATE, "");	/* set collating rules to local settings for compareName */
+
+	Globals.image_scale = max(1, (GetDeviceCaps(hdc, LOGPIXELSX) + 48) / 96);
 
 	InitCommonControlsEx(&icc);
 
@@ -4310,7 +4384,7 @@ static BOOL show_frame(HWND hwndParent, int cmdshow, LPWSTR path)
 
 	SetWindowPlacement(child->hwnd, &child->pos);
 
-	Globals.himl = ImageList_LoadImageW(Globals.hInstance, MAKEINTRESOURCEW(IDB_IMAGES), 16, 0, RGB(0,255,0), IMAGE_BITMAP, 0);
+	Globals.himl = load_image_list();
 
 	Globals.prescan_node = FALSE;
 
