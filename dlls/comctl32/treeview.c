@@ -3507,6 +3507,10 @@ TREEVIEW_Collapse(TREEVIEW_INFO *infoPtr, TREEVIEW_ITEM *item,
 	item->state &= ~TVIS_EXPANDEDONCE;
 	TREEVIEW_RemoveAllChildren(infoPtr, item);
         item->cChildren = old_cChildren;
+        /* the first visible item was one of them: freeing it cleared firstVisible, which the
+         * recalculation below needs. The collapsed item is where the view starts then. */
+        if (bSetFirstVisible && !infoPtr->firstVisible)
+            infoPtr->firstVisible = item;
     }
     if (!wasExpanded)
         return FALSE;

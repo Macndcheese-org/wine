@@ -2281,6 +2281,67 @@ static void test_expandedimage(void)
     DestroyWindow(hTree);
 }
 
+static void test_collapse_reset(void)
+{
+    HTREEITEM root, parent, child, grandchild, first;
+    TVINSERTSTRUCTA ins;
+    HWND hTree;
+    LRESULT ret;
+    int height, i;
+
+    hTree = create_treeview_control(0);
+
+    memset(&ins, 0, sizeof(ins));
+    ins.hParent = TVI_ROOT;
+    ins.hInsertAfter = TVI_LAST;
+    ins.item.mask = TVIF_TEXT;
+    ins.item.pszText = (char *)"root";
+    root = TreeView_InsertItemA(hTree, &ins);
+    ins.hParent = root;
+    ins.item.pszText = (char *)"parent";
+    parent = TreeView_InsertItemA(hTree, &ins);
+    ins.hParent = parent;
+    ins.item.pszText = (char *)"child";
+    child = TreeView_InsertItemA(hTree, &ins);
+    ins.hParent = child;
+    ins.item.pszText = (char *)"grandchild";
+    grandchild = TreeView_InsertItemA(hTree, &ins);
+    /* enough items after it for the view to start at the grandchild */
+    ins.hParent = root;
+    for (i = 0; i < 3; ++i)
+    {
+        ins.item.pszText = (char *)"tail";
+        TreeView_InsertItemA(hTree, &ins);
+    }
+
+    /* two items fit in the view */
+    height = SendMessageA(hTree, TVM_GETITEMHEIGHT, 0, 0);
+    SetWindowPos(hTree, NULL, 0, 0, 120, 2 * height + 2 * GetSystemMetrics(SM_CYEDGE),
+            SWP_NOMOVE | SWP_NOZORDER);
+
+    SendMessageA(hTree, TVM_EXPAND, TVE_EXPAND, (LPARAM)root);
+    SendMessageA(hTree, TVM_EXPAND, TVE_EXPAND, (LPARAM)parent);
+    SendMessageA(hTree, TVM_EXPAND, TVE_EXPAND, (LPARAM)child);
+
+    /* the view starts at an item that collapsing will remove */
+    ret = SendMessageA(hTree, TVM_SELECTITEM, TVGN_FIRSTVISIBLE, (LPARAM)grandchild);
+    ok(ret, "Failed to set the first visible item.\n");
+    first = (HTREEITEM)SendMessageA(hTree, TVM_GETNEXTITEM, TVGN_FIRSTVISIBLE, 0);
+    ok(first == grandchild, "Unexpected first visible item %p.\n", first);
+
+    ret = SendMessageA(hTree, TVM_EXPAND, TVE_COLLAPSE | TVE_COLLAPSERESET, (LPARAM)parent);
+    ok(ret, "Failed to collapse the item.\n");
+
+    first = (HTREEITEM)SendMessageA(hTree, TVM_GETNEXTITEM, TVGN_FIRSTVISIBLE, 0);
+    ok(first != NULL, "Expected a first visible item.\n");
+    ret = SendMessageA(hTree, TVM_GETITEMSTATE, (WPARAM)parent, TVIS_EXPANDED);
+    ok(!(ret & TVIS_EXPANDED), "Unexpected item state %#Ix.\n", ret);
+    child = (HTREEITEM)SendMessageA(hTree, TVM_GETNEXTITEM, TVGN_CHILD, (LPARAM)parent);
+    ok(!child, "Unexpected child item %p.\n", child);
+
+    DestroyWindow(hTree);
+}
+
 static void test_TVS_SINGLEEXPAND(void)
 {
     HWND hTree;
@@ -3513,6 +3574,7 @@ START_TEST(treeview)
     test_itemedit();
     test_treeview_classinfo();
     test_expandnotify();
+    test_collapse_reset();
     test_TVS_SINGLEEXPAND();
     test_WM_PAINT();
     test_WM_PRINTCLIENT();
