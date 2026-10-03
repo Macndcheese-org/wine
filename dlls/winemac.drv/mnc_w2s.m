@@ -70,8 +70,8 @@
         wineFrame = frame;
         frame.origin.x -= outsetLeft;
         frame.origin.y -= outsetTop;
-        frame.size.width += outsetLeft + outsetRight;
-        frame.size.height += outsetTop + outsetBottom;
+        frame.size.width = MAX(0, frame.size.width + outsetLeft + outsetRight);
+        frame.size.height = MAX(0, frame.size.height + outsetTop + outsetBottom);
         if (!NSEqualRects([self frame], frame))
             [self setFrame:frame];
     }
@@ -87,8 +87,9 @@
         if ([outsets count] < 4) return;
         outsetTop = MAX(0, [[outsets objectAtIndex:0] doubleValue]);
         outsetLeft = MAX(0, [[outsets objectAtIndex:1] doubleValue]);
-        outsetBottom = MAX(0, [[outsets objectAtIndex:2] doubleValue]);
-        outsetRight = MAX(0, [[outsets objectAtIndex:3] doubleValue]);
+        /* below and to the right it may be negative: a form smaller than the control it covers */
+        outsetBottom = [[outsets objectAtIndex:2] doubleValue];
+        outsetRight = [[outsets objectAtIndex:3] doubleValue];
         [self w2sApplyFrame:wineFrame];
     }
 
@@ -329,6 +330,11 @@ static CGFloat w2s_toolbar_height(NSWindow* window)
     return (top > 0 && top < 200) ? top : 52;
 }
 
+
+/* the program's names, for the titles of its windows (macdrv_w2s_window_title, below) */
+static NSMutableSet* mnc_app_names;
+static NSMutableSet* mnc_about_texts;
+static NSString* mnc_fold(NSString* s);
 
 @implementation WineWindow (W2SChrome)
 
@@ -620,11 +626,9 @@ static CGFloat w2s_toolbar_height(NSWindow* window)
 
 static BOOL w2s_native_ui;
 
-+ (void) w2sNativeUIOn
+/* the windows titled before the names or the native UI were known */
++ (void) w2sRetitle
 {
-    if (w2s_native_ui) return;
-    w2s_native_ui = TRUE;
-    /* the windows titled before */
     for (NSWindow* window in [NSApp windows])
     {
         BOOL edited;
@@ -632,12 +636,43 @@ static BOOL w2s_native_ui;
 
         if (![window isKindOfClass:[WineWindow class]]) continue;
         title = macdrv_w2s_window_title([window title], &edited);
-        if (!edited) continue;
-        [window setTitle:title];
-        [window setDocumentEdited:YES];
+        if (![title isEqualToString:[window title]]) [window setTitle:title];
+        else if (!edited) continue;
+        if (edited) [window setDocumentEdited:YES];
         if ([window isVisible] && ![window isExcludedFromWindowsMenu])
             [NSApp changeWindowsItem:window title:title filename:NO];
     }
+}
+
++ (void) w2sNativeUIOn
+{
+    if (w2s_native_ui) return;
+    w2s_native_ui = TRUE;
+    [self w2sRetitle];
+}
+
++ (void) w2sAddAppName:(NSString*)name
+{
+    NSString* folded = mnc_fold(name);
+
+    if (![folded length]) return;
+    if (!mnc_app_names) mnc_app_names = [[NSMutableSet alloc] init];
+    if ([mnc_app_names containsObject:folded]) return;
+    [mnc_app_names addObject:folded];
+    /* "Wine Wordpad": the program is Wordpad to a Mac, and the end of a title has either */
+    if ([folded hasPrefix:@"wine "] && [folded length] > 8) [mnc_app_names addObject:[folded substringFromIndex:5]];
+    [self w2sRetitle];
+}
+
++ (void) w2sAddAboutText:(NSString*)text
+{
+    NSString* folded = mnc_fold(text);
+
+    if ([folded length] < 4) return;
+    if (!mnc_about_texts) mnc_about_texts = [[NSMutableSet alloc] init];
+    if ([mnc_about_texts containsObject:folded]) return;
+    [mnc_about_texts addObject:folded];
+    [self w2sRetitle];
 }
 
 @end
@@ -655,7 +690,44 @@ bool macdrv_w2s_native_ui(void)
  * "name*") is the dot in a Mac window's close button instead (HIG, Windows).
  * Only with the native UI on; the Win32 title (GetWindowText) keeps it.
  */
-NSString *macdrv_w2s_window_title(NSString *title, BOOL *edited)
+/* "name" or "name - Program", where the program's own name is the program's: a Mac window is
+ * titled with its document (HIG, Toolbars: don't title windows with your app name). The program's
+ * names are its file name, its product name and description, and what its About item says
+ * ("About Wine Wordpad", "À propos de Bloc-notes"). Only the end of the title, and only those. */
+static NSMutableSet* mnc_app_names;      /* folded: exact or as the end of the suffix ("wine wordpad" for "wordpad") */
+static NSMutableSet* mnc_about_texts;    /* folded: the suffix is part of one */
+
+static NSString* mnc_fold(NSString* s)
+{
+    return [[s stringByFoldingWithOptions:NSCaseInsensitiveSearch | NSDiacriticInsensitiveSearch locale:nil]
+            stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+}
+
+static NSString* mnc_without_app(NSString* title)
+{
+    NSRange dash = [title rangeOfString:@" - " options:NSBackwardsSearch];
+    NSString* suffix;
+    NSRange tag;
+    NSString* folded;
+
+    if (!w2s_native_ui || dash.location == NSNotFound || dash.location == 0) return title;
+    suffix = [title substringFromIndex:NSMaxRange(dash)];
+    /* "Notepad++ [Administrator]": a tag after the name goes with it */
+    tag = [suffix rangeOfString:@" [" options:NSBackwardsSearch];
+    if (tag.location != NSNotFound && [suffix hasSuffix:@"]"]) suffix = [suffix substringToIndex:tag.location];
+    folded = mnc_fold(suffix);
+    if (![folded length]) return title;
+
+    for (NSString* name in mnc_app_names)
+        if ([folded isEqualToString:name] || ([name length] >= 4 && [folded hasSuffix:[@" " stringByAppendingString:name]]))
+            return [title substringToIndex:dash.location];
+    if ([folded length] >= 4)
+        for (NSString* text in mnc_about_texts)
+            if ([text rangeOfString:folded].location != NSNotFound) return [title substringToIndex:dash.location];
+    return title;
+}
+
+static NSString* mnc_edit_mark(NSString* title, BOOL* edited)
 {
     NSUInteger length = [title length];
     NSRange dash;
@@ -680,4 +752,16 @@ NSString *macdrv_w2s_window_title(NSString *title, BOOL *edited)
         return [[title substringToIndex:length - 1] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
     }
     return title;
+}
+
+NSString *macdrv_w2s_window_title(NSString *title, BOOL *edited)
+{
+    return mnc_without_app(mnc_edit_mark(title, edited));
+}
+
+void macdrv_w2s_add_app_name(const unsigned short* name, size_t length)
+{
+    NSString* string = [NSString stringWithCharacters:name length:length];
+
+    OnMainThreadAsync(^{ [WineWindow w2sAddAppName:string]; });
 }

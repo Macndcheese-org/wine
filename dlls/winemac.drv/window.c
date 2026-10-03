@@ -535,53 +535,29 @@ static WCHAR *title_document(const WCHAR *text, char **file)
     return NULL;
 }
 
-/* MNC Win32-to-SwiftUI: "name - App" is "name" on a Mac: a window isn't titled with its
- * app's name (HIG, Toolbars). Only the program's own name counts, the image's file
- * name without ".exe" ("notepad++" for Notepad++), so "Report - Q3" stays as it is; a
- * tag in brackets after it ("Notepad++ [Administrator]") goes with it.
- * Returns the length of the title without the suffix, or 0. */
-static size_t title_without_app(const WCHAR *text)
-{
-    const WCHAR *image = RtlGetCurrentPeb()->ProcessParameters->ImagePathName.Buffer, *p, *name = image, *suffix = NULL;
-    size_t len, i;
-
-    for (p = image; *p; p++) if (*p == '\\' || *p == '/') name = p + 1;
-    len = wcslen(name);
-    if (len > 4 && name[len - 4] == '.' && (name[len - 3] | 32) == 'e' && (name[len - 2] | 32) == 'x' &&
-        (name[len - 1] | 32) == 'e')
-        len -= 4;
-    for (p = text; *p; p++) if (p[0] == ' ' && p[1] == '-' && p[2] == ' ') suffix = p + 3;
-    if (!macdrv_w2s_native_ui() || !suffix || suffix == text + 3 || !len || wcslen(suffix) < len) return 0;
-    for (i = 0; i < len; i++)
-    {
-        WCHAR a = suffix[i], b = name[i];
-        if (a >= 'A' && a <= 'Z') a |= 32;
-        if (b >= 'A' && b <= 'Z') b |= 32;
-        if (a != b) return 0;
-    }
-    /* "Notepad++ [Administrator]": a tag in brackets, which a Mac title has no use for */
-    p = suffix + len;
-    if (*p && !(p[0] == ' ' && p[1] == '[' && p[wcslen(p) - 1] == ']')) return 0;
-    return suffix - 3 - text;
-}
-
 static void set_cocoa_window_text(WineWindow *win, const WCHAR *text)
 {
+    static BOOL seeded;
     char *file;
-    WCHAR *shorter = NULL, *document;
-    size_t keep = title_without_app(text);
+    WCHAR *document;
 
-    if (keep)
+    if (!seeded)
     {
-        shorter = malloc((keep + 1) * sizeof(WCHAR));
-        memcpy(shorter, text, keep * sizeof(WCHAR));
-        shorter[keep] = 0;
-        text = shorter;
+        /* the program's own name ends its windows' titles ("document - notepad++") */
+        const WCHAR *image = RtlGetCurrentPeb()->ProcessParameters->ImagePathName.Buffer, *p, *name = image;
+        size_t len;
+
+        seeded = TRUE;
+        for (p = image; *p; p++) if (*p == '\\' || *p == '/') name = p + 1;
+        len = wcslen(name);
+        if (len > 4 && name[len - 4] == '.' && (name[len - 3] | 32) == 'e' && (name[len - 2] | 32) == 'x' &&
+            (name[len - 1] | 32) == 'e')
+            len -= 4;
+        macdrv_w2s_add_app_name(name, len);
     }
     document = title_document(text, &file);
     macdrv_set_cocoa_window_title(win, document ? document : text, wcslen(document ? document : text), file);
     free(document);
-    free(shorter);
     free(file);
 }
 
