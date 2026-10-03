@@ -150,6 +150,10 @@
     /* the native UI is on in this process (win32swiftui loaded): a title's
        unsaved-changes mark becomes the close button's dot */
     + (void) w2sNativeUIOn;
+    /* the program's names (its file name, product name, what its About item says) end a title
+       "document - program", which a Mac window doesn't have */
+    + (void) w2sAddAppName:(NSString*)name;
+    + (void) w2sAddAboutText:(NSString*)text;
 @end
 
 
