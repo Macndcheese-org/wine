@@ -113,16 +113,6 @@ static NSString* WineLocalizedString(unsigned int stringID)
 @end
 
 
-/* MNC: whether the process runs from an app bundle that has an icon (a stub made for the program,
-   tools/app_stub.py): the system draws that icon, in the user's icon style (Liquid Glass, clear,
-   tinted), and the program's own image must not replace it. */
-static BOOL mnc_bundle_has_icon(void)
-{
-    NSBundle* bundle = [NSBundle mainBundle];
-    return [[bundle bundlePath] hasSuffix:@".app"] &&
-           ([bundle objectForInfoDictionaryKey:@"CFBundleIconFile"] || [bundle objectForInfoDictionaryKey:@"CFBundleIconName"]);
-}
-
 @implementation WineApplicationController
 
     @synthesize keyboardType, lastFlagsChanged;
@@ -411,10 +401,7 @@ static BOOL mnc_bundle_has_icon(void)
             // CrossOver Hack 10912: Mac Edit menu
             [self changeEditMenuKeyEquivalentsForWindow:[NSApp keyWindow]];
 
-            /* MNC: a program without an icon has the Mac's generic app icon, not the
-               executable's (a black "exec" square) */
-            if (!mnc_bundle_has_icon())
-                [NSApp setApplicationIconImage:self.applicationIcon ?: [[NSWorkspace sharedWorkspace] iconForFileType:@"com.apple.application-bundle"]];
+            [NSApp setApplicationIconImage:self.applicationIcon];
         }
     }
 
@@ -1198,20 +1185,9 @@ static BOOL mnc_bundle_has_icon(void)
                 [nsimage setSize:bestSize];
             else
                 nsimage = nil;
-
-            /* MNC: the icon as a Mac app's: on the rounded square of the icon grid */
-            if (nsimage)
-            {
-                NSImage* styled = macdrv_mac_style_app_icon(images);
-                if (styled) nsimage = styled;
-            }
         }
 
-        if (mnc_bundle_has_icon()) return;
         self.applicationIcon = nsimage;
-        /* the Dock may already show the process: the icon arrives with its first window */
-        if ([NSApp activationPolicy] == NSApplicationActivationPolicyRegular && nsimage)
-            [NSApp setApplicationIconImage:nsimage];
     }
 
     - (void) handleCommandTab

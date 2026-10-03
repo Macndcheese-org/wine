@@ -187,5 +187,4 @@
 extern WineW2SHostView *macdrv_w2s_host_for_view(NSView *view);
 extern BOOL macdrv_w2s_event_in_host(NSEvent *event);
 extern BOOL macdrv_w2s_key_goes_to_wine(NSEvent *event, NSResponder *responder);
-extern NSImage *macdrv_mac_style_app_icon(NSArray *images);
 extern NSString *macdrv_w2s_window_title(NSString *title, BOOL *edited);
