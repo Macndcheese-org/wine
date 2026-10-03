@@ -535,11 +535,32 @@ static WCHAR *title_document(const WCHAR *text, char **file)
     return NULL;
 }
 
+/* MNC Win32-to-SwiftUI: the frame of an MDI program is titled "App - [child]"
+ * (winefile's "Wine File Manager - [Z:\\Applications]"); on a Mac the window is
+ * the child, named by it and without the program's name. Returns the part in the
+ * brackets (free), or NULL. */
+static WCHAR *title_mdi_child(const WCHAR *text)
+{
+    const WCHAR *p, *open = NULL;
+    size_t len = wcslen(text);
+    WCHAR *child;
+
+    if (!macdrv_w2s_native_ui() || len < 5 || text[len - 1] != ']') return NULL;
+    for (p = text; p + 3 < text + len; p++)
+        if (p[0] == ' ' && p[1] == '-' && p[2] == ' ' && p[3] == '[') { open = p + 4; break; }
+    if (!open || open >= text + len - 1) return NULL;
+    len = text + len - 1 - open;
+    child = malloc((len + 1) * sizeof(WCHAR));
+    memcpy(child, open, len * sizeof(WCHAR));
+    child[len] = 0;
+    return child;
+}
+
 static void set_cocoa_window_text(WineWindow *win, const WCHAR *text)
 {
     static BOOL seeded;
     char *file;
-    WCHAR *document;
+    WCHAR *document, *child;
 
     if (!seeded)
     {
@@ -555,7 +576,10 @@ static void set_cocoa_window_text(WineWindow *win, const WCHAR *text)
             len -= 4;
         macdrv_w2s_add_app_name(name, len);
     }
-    document = title_document(text, &file);
+    child = title_mdi_child(text);
+    document = title_document(child ? child : text, &file);
+    if (!document && child) document = child;
+    else free(child);
     macdrv_set_cocoa_window_title(win, document ? document : text, wcslen(document ? document : text), file);
     free(document);
     free(file);
