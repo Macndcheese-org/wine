@@ -3552,8 +3552,11 @@ static INT dialog_get_sans_serif_height( HWND hwnd )
     hdc = GetDC( hwnd );
     if (hdc)
     {
+        /* MS Sans Serif is a bitmap font with only a few sizes, so asking
+         * for it at a high DPI doesn't give a proportionally larger font.
+         * Measure the 96 DPI size and scale that instead. */
         memset( &lf, 0, sizeof lf );
-        lf.lfHeight = MulDiv(12, GetDeviceCaps(hdc, LOGPIXELSY), 72);
+        lf.lfHeight = MulDiv(12, 96, 72);
         lstrcpyW( lf.lfFaceName, L"MS Sans Serif" );
         hFont = CreateFontIndirectW(&lf);
         if (hFont)
@@ -3561,7 +3564,7 @@ static INT dialog_get_sans_serif_height( HWND hwnd )
             hOldFont = SelectObject( hdc, hFont );
             r = GetTextMetricsW( hdc, &tm );
             if (r)
-                height = tm.tmHeight;
+                height = MulDiv( tm.tmHeight, GetDeviceCaps(hdc, LOGPIXELSY), 96 );
             SelectObject( hdc, hOldFont );
             DeleteObject( hFont );
         }
