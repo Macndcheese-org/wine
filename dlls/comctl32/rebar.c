@@ -1541,11 +1541,16 @@ REBAR_SizeToHeight(REBAR_INFO *infoPtr, int height)
             int cyBreakExtra;  /* additional cy for the rebar after a RBBS_BREAK on this band */
 
             height = lpBand->rcBand.bottom - lpBand->rcBand.top;
+            /* the band has no rectangle until the rebar is laid out */
+            if (height <= 0)
+                height = lpBand->cyMinBand;
 
             if (infoPtr->dwStyle & RBS_VARHEIGHT)
                 cyBreakExtra = lpBand->cyRowSoFar; /* 'height' => 'lpBand->cyRowSoFar' + 'height'*/
             else
                 cyBreakExtra = height;             /* 'height' => 'height' + 'height'*/
+            if (cyBreakExtra <= 0)
+                cyBreakExtra = height;
             cyBreakExtra += SEP_WIDTH;
 
             if (extra <= cyBreakExtra / 2)
