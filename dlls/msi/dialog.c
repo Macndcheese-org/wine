@@ -3802,6 +3802,24 @@ static void dialog_set_tab_order( msi_dialog *dialog, const WCHAR *first )
     list_move_head( &dialog->controls, &tab_chain );
 }
 
+/* The tree selects its first feature as it is made, before the controls that
+ * show the feature's description, size and path exist to hear about it. */
+static void dialog_seltree_publish_selection( msi_dialog *dialog )
+{
+    struct control *control;
+
+    LIST_FOR_EACH_ENTRY( control, &dialog->controls, struct control, entry )
+    {
+        struct msi_selection_tree_info *info;
+        MSIFEATURE *feature;
+
+        if (control->handler != dialog_seltree_handler) continue;
+        if (!(info = GetPropW( control->hwnd, L"MSIDATA" )) || !info->selected) continue;
+        if (!(feature = seltree_feature_from_item( control->hwnd, info->selected ))) continue;
+        seltree_fire_events( dialog, control->hwnd, info->selected, feature->Title );
+    }
+}
+
 static LRESULT dialog_oncreate( HWND hwnd, CREATESTRUCTW *cs )
 {
     msi_dialog *dialog = cs->lpCreateParams;
@@ -3848,6 +3866,7 @@ static LRESULT dialog_oncreate( HWND hwnd, CREATESTRUCTW *cs )
 
     dialog_build_font_list( dialog );
     dialog_fill_controls( dialog );
+    dialog_seltree_publish_selection( dialog );
     dialog_evaluate_control_conditions( dialog );
     dialog_set_tab_order( dialog, MSI_RecordGetString( rec, 8 ) );
     msiobj_release( &rec->hdr );
