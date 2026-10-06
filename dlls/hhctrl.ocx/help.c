@@ -38,18 +38,18 @@ static void ExpandContract(HHInfo *pHHInfo);
 
 /* Window type defaults */
 
-#define WINTYPE_DEFAULT_X           280
-#define WINTYPE_DEFAULT_Y           100
-#define WINTYPE_DEFAULT_WIDTH       740
-#define WINTYPE_DEFAULT_HEIGHT      640
-#define WINTYPE_DEFAULT_NAVWIDTH    250
+#define WINTYPE_DEFAULT_X           hh_scale(280)
+#define WINTYPE_DEFAULT_Y           hh_scale(100)
+#define WINTYPE_DEFAULT_WIDTH       hh_scale(740)
+#define WINTYPE_DEFAULT_HEIGHT      hh_scale(640)
+#define WINTYPE_DEFAULT_NAVWIDTH    hh_scale(250)
 
-#define TAB_TOP_PADDING     8
-#define TAB_RIGHT_PADDING   4
-#define TAB_MARGIN  8
-#define EDIT_HEIGHT         20
-#define BUTTON_HEIGHT       25
-#define BUTTON_WIDTH        65
+#define TAB_TOP_PADDING     hh_scale(8)
+#define TAB_RIGHT_PADDING   hh_scale(4)
+#define TAB_MARGIN  hh_scale(8)
+#define EDIT_HEIGHT         hh_scale(20)
+#define BUTTON_HEIGHT       hh_scale(25)
+#define BUTTON_WIDTH        hh_scale(65)
 
 struct list window_list = LIST_INIT(window_list);
 
@@ -408,7 +408,7 @@ static void hook_WebBrowserEvents2(HHInfo *info, BOOL init)
 
 /* Size Bar */
 
-#define SIZEBAR_WIDTH   4
+#define SIZEBAR_WIDTH   hh_scale(4)
 
 /* Draw the SizeBar */
 static void SB_OnPaint(HWND hWnd)
@@ -1610,7 +1610,7 @@ static BOOL AddIndexPopup(HHInfo *info)
                                 L"HH Popup", window_title, WS_POPUPWINDOW
                                  | WS_OVERLAPPEDWINDOW
                                  | WS_CLIPSIBLINGS | WS_CLIPCHILDREN, CW_USEDEFAULT,
-                                CW_USEDEFAULT, 300, 200, info->WinType.hwndHelp,
+                                CW_USEDEFAULT, hh_scale(300), hh_scale(200), info->WinType.hwndHelp,
                                 NULL, hhctrl_hinstance, NULL);
     free(window_title);
     if (!hwndPopup)
