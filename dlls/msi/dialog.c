@@ -2551,7 +2551,7 @@ static WCHAR *seltree_size_string( msi_dialog *dialog, INT cost )
 {
     static const struct { const WCHAR *key; const WCHAR *def; UINT shift; } units[] =
     {
-        { L"GB", L"GB", 30 }, { L"MB", L"MB", 20 }, { L"KB", L"KB", 10 }, { L"bytes", L" bytes", 0 },
+        { L"GB", L"GB", 30 }, { L"MB", L"MB", 20 }, { L"KB", L"KB", 10 },
     };
     UINT64 bytes = (UINT64)abs( cost ) * 512;
     WCHAR *unit = NULL, *ret;
