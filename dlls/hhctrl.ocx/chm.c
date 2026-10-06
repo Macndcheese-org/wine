@@ -424,8 +424,12 @@ BOOL LoadWinTypeFromCHM(HHInfo *info)
         wintype.dwStyles        = file_wintype.dwStyles;
         wintype.dwExStyles      = file_wintype.dwExStyles;
         wintype.rcWindowPos     = file_wintype.rcWindowPos;
+        wintype.rcWindowPos.left   = hh_scale(wintype.rcWindowPos.left);
+        wintype.rcWindowPos.top    = hh_scale(wintype.rcWindowPos.top);
+        wintype.rcWindowPos.right  = hh_scale(wintype.rcWindowPos.right);
+        wintype.rcWindowPos.bottom = hh_scale(wintype.rcWindowPos.bottom);
         wintype.nShowState      = file_wintype.nShowState;
-        wintype.iNavWidth       = file_wintype.iNavWidth;
+        wintype.iNavWidth       = hh_scale(file_wintype.iNavWidth);
         wintype.rcHTML          = file_wintype.rcHTML;
         wintype.pszToc          = ConvertChmString(info, file_wintype.pszToc);
         wintype.pszIndex        = ConvertChmString(info, file_wintype.pszIndex);

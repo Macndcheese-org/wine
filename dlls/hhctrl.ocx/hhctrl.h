@@ -301,6 +301,12 @@ static inline LPSTR strdupWtoA(LPCWSTR str)
 }
 
 
+/* the pixel sizes of the viewer and of a help file are laid out for 96 DPI */
+static inline int hh_scale(int value)
+{
+    return MulDiv(value, GetDpiForSystem(), 96);
+}
+
 extern HINSTANCE hhctrl_hinstance;
 extern BOOL hh_process;
 
