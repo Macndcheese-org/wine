@@ -2546,29 +2546,114 @@ static void seltree_create_imagelist( HWND hwnd )
     SendMessageW( hwnd, TVM_SETIMAGELIST, TVSIL_STATE, (LPARAM)himl );
 }
 
-static UINT dialog_seltree_handler( msi_dialog *dialog, struct control *control, WPARAM param )
+/* disk space for a cost in 512 byte units, in the units the UIText table names */
+static WCHAR *seltree_size_string( msi_dialog *dialog, INT cost )
 {
-    struct msi_selection_tree_info *info = GetPropW( control->hwnd, L"MSIDATA" );
-    LPNMTREEVIEWW tv = (LPNMTREEVIEWW)param;
-    MSIRECORD *row, *rec;
-    MSIFOLDER *folder;
-    MSIFEATURE *feature;
-    LPCWSTR dir, title = NULL;
-    UINT r = ERROR_SUCCESS;
-
-    if (tv->hdr.code != TVN_SELCHANGINGW)
-        return ERROR_SUCCESS;
-
-    info->selected = tv->itemNew.hItem;
-
-    if (!(tv->itemNew.mask & TVIF_TEXT))
+    static const struct { const WCHAR *key; const WCHAR *def; UINT shift; } units[] =
     {
-        feature = seltree_feature_from_item( control->hwnd, tv->itemNew.hItem );
-        if (feature)
-            title = feature->Title;
+        { L"GB", L"GB", 30 }, { L"MB", L"MB", 20 }, { L"KB", L"KB", 10 }, { L"bytes", L" bytes", 0 },
+    };
+    UINT64 bytes = (UINT64)abs( cost ) * 512;
+    WCHAR *unit = NULL, *ret;
+    UINT i, len;
+
+    for (i = 0; i < ARRAY_SIZE(units) - 1; i++) if (bytes >> units[i].shift) break;
+    unit = dialog_get_uitext( dialog, units[i].key );
+    len = 24 + (unit ? lstrlenW( unit ) : lstrlenW( units[i].def ));
+    if (!(ret = malloc( len * sizeof(WCHAR) ))) goto done;
+    swprintf( ret, len, L"%I64u%s", bytes >> units[i].shift, unit ? unit : units[i].def );
+done:
+    free( unit );
+    return ret;
+}
+
+/* the cost of a feature as it is going to be, and of its subfeatures: negative when it is removed */
+static INT seltree_feature_cost( MSIPACKAGE *package, MSIFEATURE *feature )
+{
+    INT cost = 0;
+
+    if (feature->ActionRequest == INSTALLSTATE_LOCAL || feature->ActionRequest == INSTALLSTATE_SOURCE ||
+        feature->ActionRequest == INSTALLSTATE_DEFAULT)
+        MSI_GetFeatureCost( package, feature, MSICOSTTREE_SELFONLY, feature->ActionRequest, &cost );
+    else if (feature->Installed == INSTALLSTATE_LOCAL && feature->ActionRequest == INSTALLSTATE_ABSENT)
+    {
+        MSI_GetFeatureCost( package, feature, MSICOSTTREE_SELFONLY, INSTALLSTATE_ABSENT, &cost );
+        cost = -cost;
+    }
+    return cost;
+}
+
+static void seltree_count_subfeatures( MSIPACKAGE *package, MSIFEATURE *feature, INT *selected, INT *total, INT *cost )
+{
+    MSIFEATURE *child;
+
+    LIST_FOR_EACH_ENTRY( child, &feature->Children, MSIFEATURE, entry )
+    {
+        (*total)++;
+        if (child->ActionRequest != INSTALLSTATE_ABSENT && child->ActionRequest != INSTALLSTATE_UNKNOWN) (*selected)++;
+        *cost += seltree_feature_cost( package, child );
+        seltree_count_subfeatures( package, child, selected, total, cost );
+    }
+}
+
+/* The text of the SelectionSize event: what the feature and its subfeatures
+ * take on the disk, from the UIText strings of the package. */
+static WCHAR *seltree_size_text( msi_dialog *dialog, MSIFEATURE *feature )
+{
+    MSIPACKAGE *package = dialog->package;
+    INT cost = seltree_feature_cost( package, feature ), selected = 0, total = 0, children = 0;
+    const WCHAR *key, *def;
+    WCHAR *text, *size, buf[1024], *out = NULL;
+    DWORD len = ARRAY_SIZE(buf);
+    MSIRECORD *rec;
+
+    seltree_count_subfeatures( package, feature, &selected, &total, &children );
+    if (!total)
+    {
+        key = cost < 0 ? L"SelChildCostNeg" : L"SelChildCostPos";
+        def = cost < 0 ? L"This feature frees up [1] on your hard drive." : L"This feature requires [1] on your hard drive.";
+    }
+    else if (cost < 0)
+    {
+        key = children < 0 ? L"SelParentCostNegNeg" : L"SelParentCostNegPos";
+        def = children < 0 ? L"This feature frees up [1] on your hard drive. It has [2] of [3] subfeatures selected. The subfeatures free up [4] on your hard drive."
+                           : L"This feature frees up [1] on your hard drive. It has [2] of [3] subfeatures selected. The subfeatures require [4] on your hard drive.";
     }
     else
-        title = tv->itemNew.pszText;
+    {
+        key = children < 0 ? L"SelParentCostPosNeg" : L"SelParentCostPosPos";
+        def = children < 0 ? L"This feature requires [1] on your hard drive. It has [2] of [3] subfeatures selected. The subfeatures free up [4] on your hard drive."
+                           : L"This feature requires [1] on your hard drive. It has [2] of [3] subfeatures selected. The subfeatures require [4] on your hard drive.";
+    }
+    if (!(text = dialog_get_uitext( dialog, key )) && !(text = wcsdup( def ))) return NULL;
+
+    /* the text's [1] to [4] are the fields of a record to format it with */
+    if ((rec = MSI_CreateRecord( 4 )))
+    {
+        MSI_RecordSetStringW( rec, 0, text );
+        size = seltree_size_string( dialog, cost );
+        MSI_RecordSetStringW( rec, 1, size );
+        free( size );
+        MSI_RecordSetInteger( rec, 2, selected );
+        MSI_RecordSetInteger( rec, 3, total );
+        size = seltree_size_string( dialog, children );
+        MSI_RecordSetStringW( rec, 4, size );
+        free( size );
+        if (!MSI_FormatRecordW( package, rec, buf, &len )) out = wcsdup( buf );
+        msiobj_release( &rec->hdr );
+    }
+    free( text );
+    return out;
+}
+
+/* the events a selected feature of the tree publishes: its description, size and path */
+static UINT seltree_fire_events( msi_dialog *dialog, HWND hwnd, HTREEITEM item, const WCHAR *title )
+{
+    MSIRECORD *row, *rec;
+    MSIFOLDER *folder;
+    MSIFEATURE *feature = seltree_feature_from_item( hwnd, item );
+    LPCWSTR dir;
+    UINT r = ERROR_SUCCESS;
 
     row = MSI_QueryGetRecord( dialog->package->db, L"SELECT * FROM `Feature` WHERE `Title` = '%s'", title );
     if (!row)
@@ -2578,6 +2663,14 @@ static UINT dialog_seltree_handler( msi_dialog *dialog, struct control *control,
 
     MSI_RecordSetStringW( rec, 1, MSI_RecordGetString( row, 4 ) );
     msi_event_fire( dialog->package, L"SelectionDescription", rec );
+
+    if (feature)
+    {
+        WCHAR *size = seltree_size_text( dialog, feature );
+        MSI_RecordSetStringW( rec, 1, size );
+        msi_event_fire( dialog->package, L"SelectionSize", rec );
+        free( size );
+    }
 
     dir = MSI_RecordGetString( row, 7 );
     if (dir)
@@ -2600,6 +2693,30 @@ done:
     msiobj_release(&rec->hdr);
 
     return r;
+}
+
+static UINT dialog_seltree_handler( msi_dialog *dialog, struct control *control, WPARAM param )
+{
+    struct msi_selection_tree_info *info = GetPropW( control->hwnd, L"MSIDATA" );
+    LPNMTREEVIEWW tv = (LPNMTREEVIEWW)param;
+    MSIFEATURE *feature;
+    LPCWSTR title = NULL;
+
+    if (tv->hdr.code != TVN_SELCHANGINGW)
+        return ERROR_SUCCESS;
+
+    info->selected = tv->itemNew.hItem;
+
+    if (!(tv->itemNew.mask & TVIF_TEXT))
+    {
+        feature = seltree_feature_from_item( control->hwnd, tv->itemNew.hItem );
+        if (feature)
+            title = feature->Title;
+    }
+    else
+        title = tv->itemNew.pszText;
+
+    return seltree_fire_events( dialog, control->hwnd, tv->itemNew.hItem, title );
 }
 
 static UINT dialog_selection_tree( msi_dialog *dialog, MSIRECORD *rec )
