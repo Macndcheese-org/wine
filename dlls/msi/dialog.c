@@ -2498,10 +2498,18 @@ static void seltree_create_imagelist( HWND hwnd )
     const int bm_width = 32, bm_height = 16, bm_count = 3;
     const int bm_resource = 0x1001;
     HIMAGELIST himl;
-    int i;
+    int i, dpi = 96;
     HBITMAP hbmp;
+    HDC hdc;
 
-    himl = ImageList_Create( bm_width, bm_height, FALSE, 4, 0 );
+    /* the bitmaps are made for 96 DPI: the images follow the text's size */
+    if ((hdc = GetDC( hwnd )))
+    {
+        dpi = GetDeviceCaps( hdc, LOGPIXELSY );
+        ReleaseDC( hwnd, hdc );
+    }
+
+    himl = ImageList_Create( MulDiv( bm_width, dpi, 96 ), MulDiv( bm_height, dpi, 96 ), FALSE, 4, 0 );
     if (!himl)
     {
         ERR("failed to create image list\n");
@@ -2521,10 +2529,18 @@ static void seltree_create_imagelist( HWND hwnd )
          * Add a dummy bitmap at offset zero because the treeview
          * can't use it as a state mask (zero means no user state).
          */
+        if (dpi != 96)
+        {
+            HBITMAP scaled = CopyImage( hbmp, IMAGE_BITMAP, MulDiv( bm_width, dpi, 96 ),
+                                        MulDiv( bm_height, dpi, 96 ), LR_COPYDELETEORG );
+            if (scaled) hbmp = scaled;
+        }
+
         if (!i)
             ImageList_Add( himl, hbmp, NULL );
 
         ImageList_Add( himl, hbmp, NULL );
+        DeleteObject( hbmp );
     }
 
     SendMessageW( hwnd, TVM_SETIMAGELIST, TVSIL_STATE, (LPARAM)himl );
