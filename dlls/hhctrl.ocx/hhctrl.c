@@ -154,10 +154,7 @@ static BOOL resolve_filename(const WCHAR *env_filename, WCHAR *fullname, DWORD b
     return TRUE;
 }
 
-/******************************************************************
- *		HtmlHelpW (HHCTRL.OCX.15)
- */
-HWND WINAPI HtmlHelpW(HWND caller, LPCWSTR filename, UINT command, DWORD_PTR data)
+static HWND html_help_w(HWND caller, LPCWSTR filename, UINT command, DWORD_PTR data)
 {
     WCHAR fullname[MAX_PATH];
 
@@ -427,10 +424,7 @@ static void wintypeWtoA(const HH_WINTYPEW *wdata, HH_WINTYPEA *data, struct wint
     data->pszCustomTabs = stringsA->pszCustomTabs = strdupWtoA(wdata->pszCustomTabs);
 }
 
-/******************************************************************
- *		HtmlHelpA (HHCTRL.OCX.14)
- */
-HWND WINAPI HtmlHelpA(HWND caller, LPCSTR filename, UINT command, DWORD_PTR data)
+static HWND html_help_a(HWND caller, LPCSTR filename, UINT command, DWORD_PTR data)
 {
     WCHAR *wfile = strdupAtoW( filename );
     HWND result = 0;
@@ -454,7 +448,7 @@ HWND WINAPI HtmlHelpA(HWND caller, LPCSTR filename, UINT command, DWORD_PTR data
             HH_WINTYPEW wdata;
 
             wintypeAtoW((HH_WINTYPEA *)data, &wdata, &stringsW);
-            result = HtmlHelpW( caller, wfile, command, (DWORD_PTR)&wdata );
+            result = html_help_w( caller, wfile, command, (DWORD_PTR)&wdata );
             wintype_stringsW_free(&stringsW);
             goto done;
         }
@@ -463,7 +457,7 @@ HWND WINAPI HtmlHelpA(HWND caller, LPCSTR filename, UINT command, DWORD_PTR data
             HH_WINTYPEW wdata;
             HHInfo *info;
 
-            result = HtmlHelpW( caller, wfile, command, (DWORD_PTR)&wdata );
+            result = html_help_w( caller, wfile, command, (DWORD_PTR)&wdata );
             if (!wdata.pszType) break;
             info = find_window(wdata.pszType);
             if (!info) break;
@@ -479,7 +473,7 @@ HWND WINAPI HtmlHelpA(HWND caller, LPCSTR filename, UINT command, DWORD_PTR data
         case HH_SAFE_DISPLAY_TOPIC:
         {
             WCHAR *wdata = strdupAtoW( (const char *)data );
-            result = HtmlHelpW( caller, wfile, command, (DWORD_PTR)wdata );
+            result = html_help_w( caller, wfile, command, (DWORD_PTR)wdata );
             free(wdata);
             goto done;
         }
@@ -500,10 +494,117 @@ HWND WINAPI HtmlHelpA(HWND caller, LPCSTR filename, UINT command, DWORD_PTR data
         }
     }
 
-    result = HtmlHelpW( caller, wfile, command, data );
+    result = html_help_w( caller, wfile, command, data );
 done:
     free(wfile);
     return result;
+}
+
+/* The viewer runs in a thread of its own, as it does on Windows unless the
+ * application asks for it to run in the thread that calls HtmlHelp, and its
+ * windows are served by that thread's message loop. Running them in the
+ * thread of the application leaves their keyboard input to the message loop
+ * of the application, which knows nothing of them. */
+#define WM_HH_CALL (WM_USER + 1)
+
+struct html_help_call
+{
+    HWND caller;
+    const void *filename;
+    UINT command;
+    DWORD_PTR data;
+    BOOL unicode;
+    HWND result;
+};
+
+static HWND hh_thread_window;
+static INIT_ONCE hh_thread_once = INIT_ONCE_STATIC_INIT;
+
+static void call_html_help(struct html_help_call *call)
+{
+    if (call->unicode)
+        call->result = html_help_w(call->caller, call->filename, call->command, call->data);
+    else
+        call->result = html_help_a(call->caller, call->filename, call->command, call->data);
+}
+
+static LRESULT CALLBACK hh_thread_wndproc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
+{
+    if (message != WM_HH_CALL)
+        return DefWindowProcW(hwnd, message, wparam, lparam);
+
+    call_html_help((struct html_help_call *)lparam);
+    return 0;
+}
+
+static DWORD WINAPI hh_thread_proc(void *param)
+{
+    HANDLE ready = param;
+    WNDCLASSW wc = {0};
+    MSG msg;
+
+    wc.lpfnWndProc = hh_thread_wndproc;
+    wc.hInstance = hhctrl_hinstance;
+    wc.lpszClassName = L"HH Thread";
+    RegisterClassW(&wc);
+    hh_thread_window = CreateWindowW(wc.lpszClassName, NULL, 0, 0, 0, 0, 0, HWND_MESSAGE,
+                                     NULL, hhctrl_hinstance, NULL);
+    SetEvent(ready);
+
+    while (hh_thread_window && GetMessageW(&msg, NULL, 0, 0))
+    {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    return 0;
+}
+
+static BOOL CALLBACK start_hh_thread(INIT_ONCE *once, void *param, void **context)
+{
+    HANDLE ready = CreateEventW(NULL, FALSE, FALSE, NULL), thread;
+    HMODULE module;
+
+    /* the thread outlives any call, so keep its code loaded */
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                       (const WCHAR *)hh_thread_proc, &module);
+    if ((thread = CreateThread(NULL, 0, hh_thread_proc, ready, 0, NULL)))
+    {
+        WaitForSingleObject(ready, INFINITE);
+        CloseHandle(thread);
+    }
+    CloseHandle(ready);
+    return TRUE;
+}
+
+static HWND html_help(HWND caller, const void *filename, UINT command, DWORD_PTR data, BOOL unicode)
+{
+    struct html_help_call call = { caller, filename, command, data, unicode };
+
+    /* hh.exe is the process of the viewer, and its message loop serves the windows */
+    if (!hh_process)
+        InitOnceExecuteOnce(&hh_thread_once, start_hh_thread, NULL, NULL);
+
+    if (hh_thread_window)
+        SendMessageW(hh_thread_window, WM_HH_CALL, 0, (LPARAM)&call);
+    else
+        call_html_help(&call);
+    return call.result;
+}
+
+/******************************************************************
+ *		HtmlHelpA (HHCTRL.OCX.14)
+ */
+HWND WINAPI HtmlHelpA(HWND caller, LPCSTR filename, UINT command, DWORD_PTR data)
+{
+    return html_help(caller, filename, command, data, FALSE);
+}
+
+/******************************************************************
+ *		HtmlHelpW (HHCTRL.OCX.15)
+ */
+HWND WINAPI HtmlHelpW(HWND caller, LPCWSTR filename, UINT command, DWORD_PTR data)
+{
+    return html_help(caller, filename, command, data, TRUE);
 }
 
 /******************************************************************
