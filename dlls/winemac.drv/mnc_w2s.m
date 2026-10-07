@@ -508,10 +508,11 @@ static NSString* mnc_fold(NSString* s);
 
     split = [[NSSplitViewController alloc] init];
     sideItem = [NSSplitViewItem sidebarWithViewController:side];
-    /* the toolbar's sidebar button (toggleSidebar:). The sidebar keeps AppKit's
+    /* the toolbar's sidebar button (toggleSidebar:), unless the app's layout cannot follow a hidden sidebar
+       (a window of a fixed size: the runtime says so). The sidebar keeps AppKit's
        minimum width: below about 140 pt, hiding it sent the button to the
        toolbar's overflow menu instead of beside the traffic lights. */
-    [sideItem setCanCollapse:YES];
+    [sideItem setCanCollapse:[spec objectForKey:@"canCollapse"] ? [[spec objectForKey:@"canCollapse"] boolValue] : YES];
     contentItem = [NSSplitViewItem splitViewItemWithViewController:contentController];
     /* a sidebar of several pages (a switch between them that has to fit) keeps to a width between
        limits, and the content is never squeezed out: the runtime says which */
