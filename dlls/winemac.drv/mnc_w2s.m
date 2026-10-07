@@ -513,6 +513,14 @@ static NSString* mnc_fold(NSString* s);
        toolbar's overflow menu instead of beside the traffic lights. */
     [sideItem setCanCollapse:YES];
     contentItem = [NSSplitViewItem splitViewItemWithViewController:contentController];
+    /* a sidebar of several pages (a switch between them that has to fit) keeps to a width between
+       limits, and the content is never squeezed out: the runtime says which */
+    if ([[spec objectForKey:@"minWidth"] doubleValue] > 0)
+        [sideItem setMinimumThickness:[[spec objectForKey:@"minWidth"] doubleValue]];
+    if ([[spec objectForKey:@"maxWidth"] doubleValue] > 0)
+        [sideItem setMaximumThickness:[[spec objectForKey:@"maxWidth"] doubleValue]];
+    if ([[spec objectForKey:@"contentMinWidth"] doubleValue] > 0)
+        [contentItem setMinimumThickness:[[spec objectForKey:@"contentMinWidth"] doubleValue]];
     if (@available(macOS 26.0, *))
         [contentItem setAutomaticallyAdjustsSafeAreaInsets:YES];
     [split addSplitViewItem:sideItem];
