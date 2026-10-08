@@ -7,8 +7,10 @@
  * last of a row is cut off at the window's edge.
  *
  * A moment after such a window is made, look for controls that their parent cuts off. If there are,
- * make the window as large as they need (never past the work area) and check that the program's
- * layout followed: if it did not, the window gets its size back.
+ * the program sized its window in pixels that were made for 96 DPI: the window gets the size it would
+ * have had on a 96 DPI display, in the same points, the size the DPI makes of it (or, if that is
+ * not enough to show them, as large as they need), never past the work area. The program's layout
+ * is then checked to have followed: if it did not, the window gets its size back.
  *
  * The check is off with WINE_MNC_FIT_WINDOW=0 in the environment, or HKCU\Software\Wine\Mac Driver\
  * FitWindow = "n", overridable per program under HKCU\Software\Wine\AppDefaults\<program.exe>\Mac Driver.
@@ -182,10 +184,15 @@ static void CALLBACK fit_timer( void *param, BOOLEAN fired )
     if (over.cx < min_over && over.cy < min_over) goto done;
     if (!GetWindowRect( fit->hwnd, &rc ) || !GetMonitorInfoW( MonitorFromWindow( fit->hwnd, MONITOR_DEFAULTTOPRIMARY ), &mi ))
         goto done;
+    /* the window as the DPI makes it (the same in points as at 96 DPI), or what the controls need if that is more */
     width = rc.right - rc.left;
     height = rc.bottom - rc.top;
-    if (over.cx >= min_over) width = min( width + over.cx + min_over / 3, mi.rcWork.right - mi.rcWork.left );
-    if (over.cy >= min_over) height = min( height + over.cy + min_over / 3, mi.rcWork.bottom - mi.rcWork.top );
+    if (over.cx >= min_over) width = max( width + over.cx + min_over / 3, MulDiv( width, GetDpiForSystem(), 96 ) );
+    else width = MulDiv( width, GetDpiForSystem(), 96 );
+    if (over.cy >= min_over) height = max( height + over.cy + min_over / 3, MulDiv( height, GetDpiForSystem(), 96 ) );
+    else height = MulDiv( height, GetDpiForSystem(), 96 );
+    width = min( width, mi.rcWork.right - mi.rcWork.left );
+    height = min( height, mi.rcWork.bottom - mi.rcWork.top );
     if (width <= rc.right - rc.left && height <= rc.bottom - rc.top) goto done;
     x = min( rc.left, mi.rcWork.right - width );
     y = min( rc.top, mi.rcWork.bottom - height );
