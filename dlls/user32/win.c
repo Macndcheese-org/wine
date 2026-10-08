@@ -394,6 +394,7 @@ HWND WIN_CreateWindowEx( CREATESTRUCTW *cs, LPCWSTR className, HINSTANCE module,
     if (!hwnd && menu && menu != cs->hMenu) NtUserDestroyMenu( menu );
     if (!unicode && window_name.Buffer != name_buf) RtlFreeUnicodeString( &window_name );
     if (hwnd) w2s_window_created( hwnd ); /* MNC Win32-to-SwiftUI */
+    if (hwnd) mnc_fit_window_created( hwnd ); /* MNC Retina mode */
     return hwnd;
 }
 

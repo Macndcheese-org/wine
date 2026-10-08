@@ -188,6 +188,9 @@ static inline void mirror_rect( const RECT *window_rect, RECT *rect )
     rect->right = width - tmp;
 }
 
+/* fitwin.c: MNC Retina mode */
+extern void mnc_fit_window_created( HWND hwnd );
+
 /* w2s.c: MNC Win32-to-SwiftUI */
 extern void w2s_window_created( HWND hwnd );
 extern BOOL w2s_message_box( const MSGBOXPARAMSW *params, INT *ret );
