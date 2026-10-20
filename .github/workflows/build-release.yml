@@ -56,10 +56,8 @@ jobs:
             freetype \
             gettext \
             gnutls \
-            gstreamer \
             krb5 \
             mingw-w64 \
-            molten-vk \
             pkg-config \
             sdl2
 
@@ -98,10 +96,10 @@ jobs:
             --with-coreaudio \
             --with-freetype \
             --with-gnutls \
-            --with-gstreamer \
+            --without-gstreamer \
             --with-mingw="ccache clang" \
             --with-sdl \
-            --with-vulkan \
+            --without-vulkan \
             --without-alsa \
             --without-capi \
             --without-dbus \
