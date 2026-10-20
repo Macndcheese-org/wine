@@ -2924,7 +2924,6 @@ TREEVIEW_UpdateScrollBars(TREEVIEW_INFO *infoPtr)
     {
 	if (infoPtr->uInternalStatus & TV_HSCROLL)
 	    ShowScrollBar(hwnd, SB_HORZ, FALSE);
-	infoPtr->uInternalStatus &= ~TV_HSCROLL;
 
 	scrollX = 0;
         if (infoPtr->scrollX != 0)
@@ -2932,6 +2931,7 @@ TREEVIEW_UpdateScrollBars(TREEVIEW_INFO *infoPtr)
 	    TREEVIEW_HScroll(infoPtr,
 	                    MAKEWPARAM(SB_THUMBPOSITION, scrollX));
         }
+	infoPtr->uInternalStatus &= ~TV_HSCROLL;
     }
 
     if (!horz)
