@@ -918,46 +918,6 @@ NTSTATUS WINAPI NtAccessCheck( PSECURITY_DESCRIPTOR descr, HANDLE token, ACCESS_
     unsigned int status;
     ULONG priv_len;
 
-    /* PATCH-032 v15: STAMP log ALWAYS, before any check, so we can prove
-     * the function was entered. If stamp fires but v15 NaN reject doesn't,
-     * we have proof the check has a logic error. */
-    {
-        char buf[200];
-        unsigned long t16;
-        int n;
-        int fd;
-
-        n = snprintf(buf, sizeof(buf),
-            "STAMP: retlen=%p (=%lx) top16=%lx\n",
-            retlen, (unsigned long)(UINT_PTR)retlen,
-            (unsigned long)((UINT_PTR)retlen >> 48));
-        fd = open("/tmp/wine_ntac_stamp.log", O_WRONLY | O_APPEND | O_CREAT, 0644);
-        if (fd >= 0) { write(fd, buf, n); close(fd); }
-
-        /* explicit top16 NaN reject using local var derived from same printf */
-        t16 = (unsigned long)((UINT_PTR)retlen >> 48);
-        if (t16 == 0x7ff8UL || t16 == 0x7ffcUL || t16 == 0xfff8UL) {
-            n = snprintf(buf, sizeof(buf),
-                ">>> v15 NaN-retlen REJECT: retlen=%lx top16=%lx\n",
-                (unsigned long)(UINT_PTR)retlen, t16);
-            fd = open("/tmp/wine_ntac_stamp.log", O_WRONLY | O_APPEND | O_CREAT, 0644);
-            if (fd >= 0) { write(fd, buf, n); close(fd); }
-            return STATUS_ACCESS_VIOLATION;
-        }
-    }
-    /* PATCH-032 v10: entry log for diagnostics. */
-    {
-        static volatile int g_entry_cnt = 0;
-        int n_entry = __atomic_add_fetch(&g_entry_cnt, 1, __ATOMIC_RELAXED);
-        char buf[256];
-        int n = snprintf(buf, sizeof(buf),
-            "[#%d] entry: retlen=%p (=%lx) privs=%p mapping=%p ag=%p as=%p\n",
-            n_entry, retlen, (unsigned long)(UINT_PTR)retlen,
-            privs, mapping, access_granted, access_status);
-        int fd = open("/tmp/wine_ntac_entry.log", O_WRONLY | O_APPEND | O_CREAT, 0644);
-        if (fd >= 0) { write(fd, buf, n); close(fd); }
-    }
-
     TRACE( "(%p, %p, %08x, %p, %p, %p, %p, %p)\n",
            descr, token, access, mapping, privs, retlen, access_granted, access_status );
 
@@ -981,27 +941,11 @@ NTSTATUS WINAPI NtAccessCheck( PSECURITY_DESCRIPTOR descr, HANDLE token, ACCESS_
      * Also reject canonical-user-space addresses below 0x10000 (likely
      * small integers) and above 0x7fff00000000 (high kernel-canonical
      * range that wine doesn't allocate in). BOGUS_PTR is at file scope. */
-    /* PATCH-032 v13: explicit single-arg NaN check FIRST. Use inline asm
-     * to bypass any compiler optimizer issues. Write to ENTRY log (known
-     * working) with distinctive marker. */
+    /* NaN-boxed pointers (upper 16 bits 0x7ff8 / 0x7ffc / 0xfff8) are never valid. */
     {
-        unsigned long rl_raw;
-        unsigned long top16;
-        __asm__ volatile ("movq %1, %%rax\n\t"
-                          "shrq $48, %%rax\n\t"
-                          "movq %%rax, %0"
-                          : "=r" (top16)
-                          : "r" ((unsigned long)(uintptr_t)retlen)
-                          : "rax");
-        rl_raw = (unsigned long)(uintptr_t)retlen;
-        if (top16 == 0x7ff8 || top16 == 0x7ffc || top16 == 0xfff8) {
-            char buf[160];
-            int n = snprintf(buf, sizeof(buf),
-                ">>> EXPLICIT-ASM NaN-rl: retlen=%lx top16=%lx\n", rl_raw, top16);
-            int fd = open("/tmp/wine_ntac_entry.log", O_WRONLY | O_APPEND | O_CREAT, 0644);
-            if (fd >= 0) { write(fd, buf, n); close(fd); }
-            return STATUS_ACCESS_VIOLATION;
-        }
+        unsigned long top16 = (unsigned long)((UINT_PTR)retlen >> 48);
+
+        if (top16 == 0x7ff8 || top16 == 0x7ffc || top16 == 0xfff8) return STATUS_ACCESS_VIOLATION;
     }
     if (!privs || !retlen ||
         (UINT_PTR)retlen < 0x1000 || (UINT_PTR)privs < 0x1000 ||
@@ -1012,31 +956,7 @@ NTSTATUS WINAPI NtAccessCheck( PSECURITY_DESCRIPTOR descr, HANDLE token, ACCESS_
         !mapping || BOGUS_PTR(mapping) ||
         (descr && BOGUS_PTR(descr)))
     {
-        /* PATCH-032 v10: count rejects too. Correlate with entry numbers. */
-        static volatile int g_reject_cnt = 0;
-        int n_reject = __atomic_add_fetch(&g_reject_cnt, 1, __ATOMIC_RELAXED);
-        void *caller = __builtin_return_address(0);
-        char buf[512];
-        int n = snprintf(buf, sizeof(buf),
-            "[#%d] reject: caller=%p retlen=%p (=%lx) privs=%p mapping=%p\n",
-            n_reject, caller, retlen, (unsigned long)(UINT_PTR)retlen,
-            privs, mapping);
-        int fd = open("/tmp/wine_ntac_reject.log", O_WRONLY | O_APPEND | O_CREAT, 0644);
-        if (fd >= 0) {
-            write(fd, buf, n);
-            close(fd);
-        }
         return STATUS_ACCESS_VIOLATION;
-    }
-    /* PATCH-032 v11: log values seen AT the deref site so we can see
-     * what slipped through our check. */
-    {
-        char buf[256];
-        int n = snprintf(buf, sizeof(buf),
-            "PRE-DEREF: retlen=%p (=%lx) — about to *retlen\n",
-            retlen, (unsigned long)(UINT_PTR)retlen);
-        int fd = open("/tmp/wine_ntac_predef.log", O_WRONLY | O_APPEND | O_CREAT, 0644);
-        if (fd >= 0) { write(fd, buf, n); close(fd); }
     }
     /* Belt-and-suspenders: prevent compiler from CSE-ing the NaN check
      * away by reading priv_len through a volatile pointer right before use. */
