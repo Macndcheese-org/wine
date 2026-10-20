@@ -4305,7 +4305,7 @@ void macdrv_clear_ime_text(void)
                 window = [[WineApplicationController sharedController] frontWineWindow];
         }
         if (window)
-            [[window wineContentView] clearMarkedText];
+            [(WineContentView*)[window wineContentView] clearMarkedText];
     });
 }
 

@@ -704,7 +704,7 @@ static struct dxmt_macdrv_win_data *my_get_win_data(HWND hwnd)
      * It does:
      * get_win_data() -> create_metal_device() -> create_metal_view() -> get_metal_layer() -> release_win_data()
      */
-    client_surface = macdrv_CreateClientSurface(hwnd, 0, false);
+    client_surface = (struct macdrv_client_surface *)macdrv_CreateClientSurface(hwnd, 0, false);
 
     /* get_win_data() needs to happen after client_surface creation to avoid deadlocks */
     data = get_win_data(hwnd);
