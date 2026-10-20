@@ -44,6 +44,10 @@ res=$app/Contents/Resources
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$res"
 cp -Rp "$install" "$res/wine"
+# Development files are not part of the application: the compiler driver and the IDL/resource
+# tools carry /usr/local default search paths, and nobody builds programs with this app.
+(cd "$res/wine" && rm -rf include bin/winegcc bin/wineg++ bin/winecpp bin/widl bin/wrc bin/wmc \
+   bin/winebuild bin/winemaker bin/function_grep.pl && find lib -name '*.a' -delete)
 
 arch_dir=$res/wine/lib/wine
 if [ -n "$d3d" ]; then

@@ -40,9 +40,14 @@ def is_macho(path):
 
 
 def macho_files(prefix):
+    # lib/external holds the GPTK files (D3DMetal.framework, libd3dshared.dylib): Apple's own
+    # signature, run paths and libraries (libmetalirconverter inside the framework) stay as they are.
+    external = os.path.join(prefix, "lib", "external") + os.sep
     for root, _, names in os.walk(prefix):
         for name in names:
             path = os.path.join(root, name)
+            if path.startswith(external):
+                continue
             if is_macho(path):
                 yield path
 
@@ -101,6 +106,20 @@ def soname_seeds(config_h):
     return names
 
 
+def found_by_rpath(dep, requester):
+    """True when an @rpath/ name is a file that one of the binary's own relative run paths leads to
+    (Wine's .so files name each other, such as @rpath/ntdll.so, and rely on @loader_path)."""
+    if not dep.startswith("@rpath/") or not os.path.isfile(requester):
+        return False
+    here = os.path.dirname(os.path.realpath(requester))
+    for r in rpaths(requester):
+        if r.startswith(("@loader_path", "@executable_path")):
+            base = r.replace("@loader_path", here).replace("@executable_path", here)
+            if os.path.exists(os.path.join(base, dep[len("@rpath/"):])):
+                return True
+    return False
+
+
 def rpath_for(binary, libdir):
     rel = os.path.relpath(libdir, os.path.dirname(os.path.realpath(binary)))
     return "@loader_path/" + rel if rel != "." else "@loader_path"
@@ -124,7 +143,7 @@ def main():
     queue = []
 
     def want(dep, requester):
-        if is_system(dep):
+        if is_system(dep) or found_by_rpath(dep, requester):
             return
         src = resolve(dep, requester, args.search)
         if not src:
@@ -173,13 +192,16 @@ def main():
             changes += ["-id", "@rpath/" + os.path.basename(b)]
         wanted = rpath_for(b, libdir)
         have = rpaths(b)
-        for old in have:                                   # nothing absolute may stay
+        for old in dict.fromkeys(have):                    # nothing absolute may stay
             if not old.startswith(("@loader_path", "@executable_path")):
                 changes += ["-delete_rpath", old]
         if wanted not in have:
             changes += ["-add_rpath", wanted]
         if changes:
-            run(INSTALL_NAME_TOOL, *changes, b)
+            try:
+                run(INSTALL_NAME_TOOL, *changes, b)
+            except subprocess.CalledProcessError as e:
+                sys.exit("install_name_tool failed on %s: %s" % (b, e.stderr.strip()))
             if not args.no_sign:
                 run(CODESIGN, "--force", "--sign", "-", b)
 

@@ -30,8 +30,24 @@ BAD_LOCATION = re.compile(rb"/opt/homebrew|/usr/local/(?:Cellar|opt|lib|include)
 BARE_DYLIB = re.compile(rb"(?<![\w/@.+-])(lib[\w+.-]*\.dylib)\0")
 DYLD_VAR = re.compile(rb"\bDYLD_[A-Z_]+")
 
-# Strings in Wine's own code that are not locations the bundle depends on.
-BARE_DYLIB_OK = set()
+# Strings that are not locations the bundle depends on.
+# Bare names opened by bundled third-party libraries for features Wine does not use: SDL's video
+# back ends (Wine uses SDL for game controllers only), x265's sibling libraries for other bit
+# depths (encoding), and Apple's own D3DMetal files, which cannot be edited.
+BARE_DYLIB_OK = {
+    ("libSDL2-2.0.0.dylib", name) for name in (
+        "libGLESv2.dylib", "libGLESv1_CM.dylib", "libGLES_CM.dylib", "libEGL.dylib",
+        "libvulkan.1.dylib", "libvulkan.dylib", "libMoltenVK.dylib")
+} | {
+    ("libx265.216.dylib", name) for name in (
+        "libx265.dylib", "libx265_main.dylib", "libx265_main10.dylib", "libx265_main12.dylib")
+} | {
+    ("libdxcompiler.dylib", "libdxcompiler.dylib"),
+    ("libdxccontainer.dylib", "libdxcompiler.dylib"),
+}
+# Third-party libraries carry the prefix they were compiled for (translations, plug-in folders).
+# Wine's own files and the scripts must be clean; these are only reported.
+THIRD_PARTY_PREFIX = "Contents/Resources/wine/lib/"
 DYLD_OK = {                      # ntdll.so points DYLD_LIBRARY_PATH at the build tree, only in a build tree
     ("ntdll.so", b"DYLD_LIBRARY_PATH"),
     ("ntdll.so", b"DYLD_INSERT_LIBRARIES"),
@@ -39,6 +55,7 @@ DYLD_OK = {                      # ntdll.so points DYLD_LIBRARY_PATH at the buil
 }
 
 errors = []
+notes = []
 
 
 def fail(msg):
@@ -54,6 +71,13 @@ def is_macho(path):
         return False
     with open(path, "rb") as f:
         return f.read(4) in MAGICS
+
+
+def is_pe(path):
+    """Windows programs and libraries carry the paths of the compiler that built them (debug and
+    assert strings); they are not loaded by dyld."""
+    with open(path, "rb") as f:
+        return f.read(2) == b"MZ"
 
 
 def load_commands(path):
@@ -80,9 +104,16 @@ def expand(rpath, binary):
 
 def check_macho(path, rel):
     libs, rpaths = load_commands(path)
+    # lib/external holds the GPTK files exactly as Apple signed them: their run paths include
+    # Apple build-machine locations that don't exist anywhere, and cannot be edited without
+    # breaking the signature.  They must still not point at Homebrew or /usr/local.
+    apple = (os.sep + "lib" + os.sep + "external" + os.sep) in rel
     for r in rpaths:
-        if not r.startswith(("@loader_path", "@executable_path")):
-            fail("%s: run path %s is not relative" % (rel, r))
+        if r.startswith(("@loader_path", "@executable_path")):
+            continue
+        if apple and not BAD_LOCATION.search(r.encode()):
+            continue
+        fail("%s: run path %s is not relative" % (rel, r))
     ident = own_id(path)
     for lib in libs:
         if lib == ident or lib.startswith(SYSTEM):
@@ -101,6 +132,10 @@ def check_macho(path, rel):
             fail("%s: signature missing or invalid" % rel)
 
 
+def is_third_party(rel):
+    return rel.startswith(THIRD_PARTY_PREFIX) and os.path.dirname(rel) == THIRD_PARTY_PREFIX.rstrip("/")
+
+
 def check_bytes(path, rel, binary):
     with open(path, "rb") as f:
         data = f.read()
@@ -111,11 +146,14 @@ def check_bytes(path, rel, binary):
         # sections but not as a library location
         if text.startswith(("/Users/",)):
             continue
-        fail("%s: contains the location %s" % (rel, text))
+        if is_third_party(rel):
+            notes.append("%s: compiled for %s" % (rel, text))
+        else:
+            fail("%s: contains the location %s" % (rel, text))
         break
     if binary:
         for m in BARE_DYLIB.finditer(data):
-            if m.group(1).decode() not in BARE_DYLIB_OK:
+            if (base, m.group(1).decode()) not in BARE_DYLIB_OK:
                 fail("%s: opens %s by bare name (use an @rpath/ name)" % (rel, m.group(1).decode()))
     for m in DYLD_VAR.finditer(data):
         if (base, m.group(0)) not in DYLD_OK:
@@ -138,9 +176,11 @@ def main():
             if macho:
                 count += 1
                 check_macho(path, rel)
-            if macho or name.endswith((".sh", ".plist", ".command")) or os.access(path, os.X_OK):
+            if macho or name.endswith((".sh", ".plist", ".command")) or (os.access(path, os.X_OK) and not is_pe(path)):
                 if os.path.getsize(path) < 64 * 1024 * 1024:
                     check_bytes(path, rel, macho)
+    for n in notes:
+        print("note", n)
     for e in errors:
         print("FAIL", e)
     print("%d binaries checked, %d problems" % (count, len(errors)))
