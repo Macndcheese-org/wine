@@ -1167,6 +1167,62 @@ static void test_get_set_itemheight(void)
     DestroyWindow(hTree);
 }
 
+static void test_horizontal_scroll_reset(void)
+{
+    static char root_text[] = "A root item with a rather long label";
+    static char child_text[] = "A child item with an equally long label";
+    TVINSERTSTRUCTA ins;
+    HTREEITEM root;
+    SCROLLINFO si;
+    RECT rect, old_rect;
+    HWND hTree;
+    BOOL ret;
+    int i;
+
+    hTree = create_treeview_control(0);
+    SetWindowPos(hTree, NULL, 0, 0, 100, 60, SWP_NOMOVE | SWP_NOZORDER);
+
+    ins.hParent = TVI_ROOT;
+    ins.hInsertAfter = TVI_LAST;
+    ins.item.mask = TVIF_TEXT;
+    ins.item.pszText = root_text;
+    root = TreeView_InsertItemA(hTree, &ins);
+    ok(root != NULL, "Failed to insert the root item.\n");
+
+    ins.hParent = root;
+    ins.item.pszText = child_text;
+    for (i = 0; i < 20; i++)
+        TreeView_InsertItemA(hTree, &ins);
+    SendMessageA(hTree, TVM_EXPAND, TVE_EXPAND, (LPARAM)root);
+
+    /* Too narrow for the labels and too short for the items: both scroll bars. */
+    memset(&si, 0, sizeof(si));
+    si.cbSize = sizeof(si);
+    si.fMask = SIF_RANGE | SIF_PAGE;
+    ret = GetScrollInfo(hTree, SB_HORZ, &si);
+    ok(ret, "Failed to get the horizontal scroll info.\n");
+    ok(si.nMax - si.nMin >= (int)si.nPage, "Unexpected scroll range %d-%d, page %u.\n", si.nMin, si.nMax, si.nPage);
+
+    ret = TreeView_GetItemRect(hTree, root, &old_rect, TRUE);
+    ok(ret, "Failed to get the item rectangle.\n");
+
+    SendMessageA(hTree, WM_HSCROLL, MAKEWPARAM(SB_THUMBPOSITION, 30), 0);
+    ret = TreeView_GetItemRect(hTree, root, &rect, TRUE);
+    ok(ret, "Failed to get the item rectangle.\n");
+    ok(rect.left < old_rect.left, "Expected the item to be scrolled left, got %ld, was %ld.\n", rect.left, old_rect.left);
+
+    /* Wide enough for the labels, still too short for the items: no horizontal scroll bar any more. */
+    SetWindowPos(hTree, NULL, 0, 0, 600, 60, SWP_NOMOVE | SWP_NOZORDER);
+
+    ret = TreeView_GetItemRect(hTree, root, &rect, TRUE);
+    ok(ret, "Failed to get the item rectangle.\n");
+    ok(rect.left == old_rect.left, "Expected the scroll position to be reset, got %ld, expected %ld.\n",
+            rect.left, old_rect.left);
+    ok(GetScrollPos(hTree, SB_HORZ) == 0, "Unexpected scroll position %d.\n", GetScrollPos(hTree, SB_HORZ));
+
+    DestroyWindow(hTree);
+}
+
 static void test_get_set_scrolltime(void)
 {
     int ulExpectedTime = 20;
@@ -3503,6 +3559,7 @@ START_TEST(treeview)
     test_get_set_item();
     test_get_set_itemheight();
     test_get_set_scrolltime();
+    test_horizontal_scroll_reset();
     test_get_set_textcolor();
     test_get_linecolor();
     test_get_insertmarkcolor();
@@ -3545,6 +3602,7 @@ START_TEST(treeview)
     test_get_set_insertmark();
     test_get_set_item();
     test_get_set_scrolltime();
+    test_horizontal_scroll_reset();
     test_get_set_textcolor();
     test_get_linecolor();
     test_get_insertmarkcolor();
