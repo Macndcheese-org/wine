@@ -1193,6 +1193,28 @@ static BOOL is_translated_process(void)
 #endif
 }
 
+/* MNC: where libd3dshared.dylib lives.  The backend app exports the path, but a
+ * standalone install (the Wine .app) has no backend, so without a default D3DMetal
+ * would never be found there.  The install keeps GPTK next to the builtin dlls, in
+ * <prefix>/lib/external (the layout CrossOver uses too). */
+const char *get_libd3dshared_path(void)
+{
+    static char *default_path;
+    const char *path = getenv( "CX_APPLEGPTK_LIBD3DSHARED_PATH" );
+
+    if (!path || !*path) path = getenv( "CX_APPLEGPT_LIBD3DSHARED_PATH" );
+    if (path && *path) return path;
+    if (!default_path && dll_dir)
+    {
+        char *name;
+
+        asprintf( &name, "%s/../external/libd3dshared.dylib", dll_dir );
+        if (name && !access( name, R_OK )) default_path = name;
+        else free( name );
+    }
+    return default_path;
+}
+
 static void init_non_native_support(void)
 {
     /* MNC HACK 15a: GPTK 3.0 and newer spell the variable
@@ -1201,9 +1223,7 @@ static void init_non_native_support(void)
      * three launch paths, so without this fallback those launches register
      * nothing and D3DMetal's caller detection never sees the PE ranges.  Try
      * modern first, fall back to legacy. */
-    const char *libd3dshared_path = getenv( "CX_APPLEGPTK_LIBD3DSHARED_PATH" );
-
-    if (!libd3dshared_path) libd3dshared_path = getenv( "CX_APPLEGPT_LIBD3DSHARED_PATH" );
+    const char *libd3dshared_path = get_libd3dshared_path();
 
     register_non_native_code_region = NULL;
     supports_non_native_code_regions = NULL;

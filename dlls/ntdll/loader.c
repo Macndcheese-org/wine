@@ -4427,6 +4427,73 @@ static BOOL is_cef_host_process(void)
     return cached;
 }
 
+/* MNC: does THIS process use Direct3D 12?  The production Wine routes DX9-DX11 to DXMT and
+ * DX12 to D3DMetal when nothing says otherwise, but dxgi.dll is shared by both, so the choice
+ * has to be made on the first d3d load, before the game has said which API it wants.  Two
+ * structural tests, neither of which needs a name list: the executable imports (or
+ * delay-imports) d3d12.dll, or it ships the Agility SDK runtime (D3D12Core.dll) beside itself.
+ * A program that LoadLibrary()s d3d12.dll without either must be told with MNC_GAME_BACKEND. */
+static BOOL image_imports_d3d12( HMODULE module )
+{
+    const IMAGE_IMPORT_DESCRIPTOR *imp;
+    const IMAGE_DELAYLOAD_DESCRIPTOR *delay;
+    ULONG size;
+
+    if ((imp = RtlImageDirectoryEntryToData( module, TRUE, IMAGE_DIRECTORY_ENTRY_IMPORT, &size )))
+    {
+        for (; imp->Name && imp->FirstThunk; imp++)
+            if (!_strnicmp( (const char *)module + imp->Name, "d3d12.dll", 10 )) return TRUE;
+    }
+    if ((delay = RtlImageDirectoryEntryToData( module, TRUE, IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT, &size )))
+    {
+        for (; delay->DllNameRVA; delay++)
+            if (!_strnicmp( (const char *)module + delay->DllNameRVA, "d3d12.dll", 10 )) return TRUE;
+    }
+    return FALSE;
+}
+
+static BOOL file_exists_beside_image( const UNICODE_STRING *img, const WCHAR *rel )
+{
+    UNICODE_STRING nt_name;
+    OBJECT_ATTRIBUTES attr;
+    FILE_BASIC_INFORMATION info;
+    WCHAR path[MAX_PATH];
+    unsigned int len;
+    BOOL ret = FALSE;
+
+    len = img->Length / sizeof(WCHAR);
+    while (len > 0 && img->Buffer[len - 1] != '\\' && img->Buffer[len - 1] != '/') len--;
+    if (!len || len + wcslen( rel ) + 1 > ARRAY_SIZE(path)) return FALSE;
+    memcpy( path, img->Buffer, len * sizeof(WCHAR) );
+    wcscpy( path + len, rel );
+
+    if (RtlDosPathNameToNtPathName_U( path, &nt_name, NULL, NULL ))
+    {
+        InitializeObjectAttributes( &attr, &nt_name, OBJ_CASE_INSENSITIVE, 0, NULL );
+        ret = !NtQueryAttributesFile( &attr, &info );
+        RtlFreeUnicodeString( &nt_name );
+    }
+    return ret;
+}
+
+static BOOL is_dx12_process(void)
+{
+    static int cached = -1;
+
+    if (cached == -1)
+    {
+        RTL_USER_PROCESS_PARAMETERS *params = NtCurrentTeb()->Peb->ProcessParameters;
+        HMODULE image = NtCurrentTeb()->Peb->ImageBaseAddress;
+
+        if (!params || !image) return FALSE;     /* too early to tell; don't cache */
+        cached = image_imports_d3d12( image ) ||
+                 file_exists_beside_image( &params->ImagePathName, L"D3D12Core.dll" ) ||
+                 file_exists_beside_image( &params->ImagePathName, L"D3D12\\D3D12Core.dll" );
+        TRACE( "mnc: process %s DX12\n", cached ? "uses" : "does not use" );
+    }
+    return cached;
+}
+
 static const WCHAR *steam_dxmt_redirect( const WCHAR *libname )
 {
     /* UNIFIED build (inverted): Steam exes use the DEFAULT d3d builtins, which are
@@ -4462,6 +4529,7 @@ static const WCHAR *steam_dxmt_redirect( const WCHAR *libname )
     const WCHAR *base = libname, *p;
     unsigned int i;
     int game_dxvk = 0, game_dxmt = 0, game_openxr = 0, game_opengl = 0;  /* else d3dmetal. dxmt/dxvk/openxr/opengl route to their columns */
+    int game_auto = 0;  /* nothing chose a backend: DX12 -> d3dmetal, DX9-DX11 -> dxmt (see is_dx12_process) */
 
     for (p = libname; *p; p++) if (*p == '\\' || *p == '/') base = p + 1;
 
@@ -4538,9 +4606,13 @@ static const WCHAR *steam_dxmt_redirect( const WCHAR *libname )
             UNICODE_STRING n2, v2; WCHAR vb2[4];
             RtlInitUnicodeString( &n2, L"MNC_GAME_D3DMETAL" );
             v2.Buffer = vb2; v2.Length = 0; v2.MaximumLength = sizeof(vb2);
-            if (!RtlQueryEnvironmentVariable_U( NULL, &n2, &v2 ) &&
-                v2.Length >= sizeof(WCHAR) && vb2[0] == '0') game_dxmt = 1;
+            if (!RtlQueryEnvironmentVariable_U( NULL, &n2, &v2 ))
+            {
+                if (v2.Length >= sizeof(WCHAR) && vb2[0] == '0') game_dxmt = 1;
+            }
+            else game_auto = 1;
         }
+        /* an unknown MNC_GAME_BACKEND value (or "d3dmetal") keeps its old meaning: D3DMetal */
     }
     /* Bradar only remap bare names so the 12on7 agility probe path fails like on windows */
     if (base == libname)
@@ -4549,7 +4621,24 @@ static const WCHAR *steam_dxmt_redirect( const WCHAR *libname )
         {
             if (!wcsicmp( base, map[i].from ))
             {
-                const WCHAR *to = game_opengl ? map[i].opengl : game_openxr ? map[i].openxr : game_dxmt ? map[i].dxmt : game_dxvk ? map[i].dxvk : map[i].d3dm;
+                const WCHAR *to;
+
+                if (game_auto)
+                {
+#ifdef _WIN64
+                    /* DX12 (and the d3d12 dll itself, which only D3DMetal provides) goes to
+                     * D3DMetal, everything else to DXMT; d3d10.dll has no DXMT build of its own
+                     * and stays the builtin, which sits on top of the routed d3d10core. */
+                    if (wcsicmp( base, L"d3d12" ) && wcsicmp( base, L"d3d12.dll" ) && !is_dx12_process())
+                    {
+                        if (!map[i].dxmt) break;
+                        game_dxmt = 1;
+                    }
+#else
+                    break;   /* DXMT and D3DMetal are 64-bit only: 32-bit processes keep the builtin d3d */
+#endif
+                }
+                to = game_opengl ? map[i].opengl : game_openxr ? map[i].openxr : game_dxmt ? map[i].dxmt : game_dxvk ? map[i].dxvk : map[i].d3dm;
                 if (to)
                 {
                     TRACE( "mnc: routing game %s -> %s\n", debugstr_w(libname), debugstr_w(to) );

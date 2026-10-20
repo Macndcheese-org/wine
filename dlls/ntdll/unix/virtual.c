@@ -854,7 +854,7 @@ static NTSTATUS get_d3dmetal_unix_funcs_fallback( void *module, BOOL wow, const 
     if (wow) return STATUS_DLL_NOT_FOUND;
     if (!is_d3dmetal_pe_stub( module, &module_name )) return STATUS_DLL_NOT_FOUND;
 
-    path = getenv( "CX_APPLEGPT_LIBD3DSHARED_PATH" );
+    path = get_libd3dshared_path();
     if (!path || !*path) return STATUS_DLL_NOT_FOUND;
 
     if (!libd3dshared)

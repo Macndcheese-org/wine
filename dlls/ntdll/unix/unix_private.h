@@ -214,6 +214,9 @@ extern const char wine_build[];
 extern const char *home_dir;
 extern const char *data_dir;
 extern const char *build_dir;
+#if defined(__APPLE__) && defined(__x86_64__)
+extern const char *get_libd3dshared_path(void);
+#endif
 extern const char *config_dir;
 extern const char *wineloader;
 extern const char *user_name;
