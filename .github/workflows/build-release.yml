@@ -1,24 +1,29 @@
 name: Build and Release
 
-# Builds this repo's full Wine source tree on every push to main and publishes
-# the result as a GitHub Release asset (.tar.xz). Unlike the sibling
-# wine-MacNdCheese-Engine- repo (which clones upstream wine-staging and applies
-# patch files), this repo already IS the patched source tree, so CI just
-# checks it out and builds it directly.
+# This repo already IS the patched source tree (Wine, Wine Staging, the Aqua patches and the
+# MNC patches), so CI checks it out and builds it directly.
 #
-# NOTE on the compiler: the known-good local build command for this repo uses
-# CC=/tmp/wcc CXX=/tmp/wcxx (compiler wrapper scripts that live only on the
-# dev machine, outside this repo — there is no record of their exact contents
-# to reproduce here). This workflow uses plain clang + --with-mingw instead,
-# matching the sibling repo's build-release.yml, which is proven to produce a
-# working wow64 (i386+x86_64) build of this same patch set on a GitHub-hosted
-# runner. If a build fails in a way plain clang can't explain, the missing
-# wcc/wcxx behavior is the first thing to check.
+# What this builds: Wine itself plus the "MNC Wine.app" bundle, with every library it needs inside
+# the bundle (packaging/).  Nothing in it may depend on Homebrew or on DYLD_* variables:
+# packaging/verify-app.py runs at the end and fails the build if anything does.
+#
+# What it does not contain: GPTK/D3DMetal, the DXMT builds and win32swiftui.  They come from
+# files that are not in this repository; packaging/README.md describes how the complete release is
+# assembled from this build with packaging/import-gptk.sh and packaging/build-app.sh.
+#
+# A branch push builds and keeps the result as a run artifact.  A release is made only for a tag
+# of the form 11.20.0 (or by running the workflow by hand and asking for it).
 
 on:
   push:
-    branches: [main]
-  workflow_dispatch: {}
+    branches: ['mnc-**']
+    tags: ['[0-9]+.[0-9]+.[0-9]+']
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Create a GitHub release from this build'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -37,9 +42,6 @@ jobs:
       # mtime changes. Check content instead, matching upstream Wine's own
       # CI (tools/gitlab/build.yml) -- avoids spurious cache misses.
       CCACHE_COMPILERCHECK: content
-    outputs:
-      asset: ${{ steps.package.outputs.asset }}
-      tag: ${{ steps.package.outputs.tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -80,14 +82,16 @@ jobs:
       - name: Configure
         run: |
           rm -rf build64 && mkdir build64 && cd build64
+          # No -rpath to Homebrew: the libraries are copied into the bundle afterwards.
           CC="ccache clang" \
           CXX="ccache clang++" \
           OBJC="ccache clang" \
           OBJCXX="ccache clang++" \
-          LDFLAGS="-Wl,-rpath,$(brew --prefix)/lib -L$(xcrun --show-sdk-path)/System/Library/Frameworks/OpenGL.framework/Versions/A/Libraries" \
+          LDFLAGS="-L$(xcrun --show-sdk-path)/System/Library/Frameworks/OpenGL.framework/Versions/A/Libraries" \
           PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig" \
           MACOSX_DEPLOYMENT_TARGET=11.0 \
           ../configure \
+            --prefix=/opt/mnc-wine \
             --build=x86_64-apple-darwin \
             --enable-win64 \
             --enable-archs=i386,x86_64 \
@@ -107,6 +111,10 @@ jobs:
             --without-v4l2 \
             --without-x \
             --disable-tests
+          # Wine opens these libraries by bare name, which dyld looks up in /usr/local/lib (that is
+          # Homebrew).  Turn each into an @rpath/ name so that only the bundle is searched.
+          sed -i '' -E 's|^(#define SONAME_LIB[A-Z0-9_]+ ")(lib)|\1@rpath/\2|' include/config.h
+          grep '^#define SONAME_LIB' include/config.h
 
       - name: Build
         run: make -C build64 -j"$(sysctl -n hw.ncpu)"
@@ -114,17 +122,27 @@ jobs:
       - name: Package
         id: package
         run: |
-          VERSION="$(grep -o '[0-9][0-9.]*' VERSION | head -1)"
-          SHORT_SHA="$(git rev-parse --short HEAD)"
-          ASSET="wine-macndcheese-${VERSION}-${SHORT_SHA}-osx64.tar.xz"
-          TAG="build-${{ github.run_number }}-${SHORT_SHA}"
+          # 11.20.0 for a tag, otherwise the wine version with the commit
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then VERSION="$GITHUB_REF_NAME"
+          else VERSION="$(grep -o '[0-9][0-9.]*' VERSION | head -1).0-$(git rev-parse --short HEAD)"; fi
 
           make -C build64 install DESTDIR="$GITHUB_WORKSPACE/dist"
-          tar -cJf "$ASSET" -C "$GITHUB_WORKSPACE/dist" .
+          packaging/build-app.sh \
+            --install-dir "$GITHUB_WORKSPACE/dist/opt/mnc-wine" \
+            --config-h build64/include/config.h \
+            --version "$VERSION" \
+            --out "$GITHUB_WORKSPACE/out" \
+            --archive
 
-          echo "asset=$ASSET"     >> "$GITHUB_OUTPUT"
+          echo "asset=MNC-Wine-$VERSION-osx64.tar.xz" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=$TAG"         >> "$GITHUB_OUTPUT"
+
+      - name: Keep the build
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.asset }}
+          path: out/${{ steps.package.outputs.asset }}
+          retention-days: 14
 
       - name: Upload config.log on failure
         if: failure()
@@ -135,16 +153,15 @@ jobs:
           retention-days: 7
 
       - name: Create release
+        if: ${{ github.ref_type == 'tag' || inputs.publish }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${{ steps.package.outputs.tag }}" \
-            "${{ steps.package.outputs.asset }}" \
+          gh release create "${{ steps.package.outputs.version }}" \
+            "out/${{ steps.package.outputs.asset }}" \
             --repo "${{ github.repository }}" \
-            --title "MacNdCheese Wine ${{ steps.package.outputs.version }} (${{ steps.package.outputs.tag }})" \
-            --notes "Automated build of $(git log -1 --format='%H') on main:
-
-          $(git log -1 --format='%s')"
+            --title "MNC Wine ${{ steps.package.outputs.version }}" \
+            --notes "Built from $(git log -1 --format='%H') ($(git log -1 --format='%s'))."
 
   on-failure:
     needs: build
@@ -158,10 +175,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          TITLE="build: main failed to build (${{ github.sha }})"
+          TITLE="build: ${{ github.ref_name }} failed to build (${{ github.sha }})"
           gh issue create --repo "${{ github.repository }}" \
             --title "$TITLE" \
             --label "build-failure,automated" \
-            --body "Automated build for commit ${{ github.sha }} on main failed.
+            --body "Automated build for commit ${{ github.sha }} on ${{ github.ref_name }} failed.
 
           Failing run: ${RUN_URL}"
