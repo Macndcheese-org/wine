@@ -7,7 +7,7 @@
 #   --version      version of the application, for example 11.20.0
 #   --out          folder that receives MNC Wine.app
 #   --d3d-dir      output of import-gptk.sh (DXMT, D3DMetal and the rest of the Direct3D set)
-#   --w2s-dir      folder with win32swiftui.dll and win32swiftui.so, from the Win32-to-SwiftUI build
+#   --w2s-dir      folder with win32swiftui.dll and win32swiftui.so (and i386/win32swiftui.dll), from the Win32-to-SwiftUI build
 #   --config-h     include/config.h of the build, to bundle the libraries Wine opens with dlopen
 #   --search       where to find the libraries to bundle (repeatable; default: the Homebrew prefix lib)
 #   --icon         .icns file for the application (optional)
@@ -58,6 +58,8 @@ fi
 if [ -n "$w2s" ]; then
   cp -p "$w2s/win32swiftui.dll" "$arch_dir/x86_64-windows/"
   cp -p "$w2s/win32swiftui.so"  "$arch_dir/x86_64-unix/"
+  # 32-bit programs (installers, old games) get the layer too when the folder has it
+  [ -f "$w2s/i386/win32swiftui.dll" ] && cp -p "$w2s/i386/win32swiftui.dll" "$arch_dir/i386-windows/"
 fi
 
 # launcher and Info.plist
