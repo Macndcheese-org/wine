@@ -4617,6 +4617,16 @@ static const WCHAR *steam_dxmt_redirect( const WCHAR *libname )
     /* Bradar only remap bare names so the 12on7 agility probe path fails like on windows */
     if (base == libname)
     {
+#ifdef _WIN64
+        /* DX9 has no D3DMetal column: when nothing chose a backend a 64-bit program that is not DX12 gets
+         * DXMT's d3d9 (shipped as d3d9_dxmt.dll).  A launch that names its backend is left alone: the
+         * backend app stages its own d3d9 for it. */
+        if (game_auto && (!wcsicmp( base, L"d3d9" ) || !wcsicmp( base, L"d3d9.dll" )) && !is_dx12_process())
+        {
+            TRACE( "mnc: routing %s -> d3d9_dxmt.dll\n", debugstr_w(libname) );
+            return L"d3d9_dxmt.dll";
+        }
+#endif
         for (i = 0; i < ARRAY_SIZE(map); i++)
         {
             if (!wcsicmp( base, map[i].from ))
