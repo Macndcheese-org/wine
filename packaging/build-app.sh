@@ -7,6 +7,7 @@
 #   --version      version of the application, for example 11.20.0
 #   --out          folder that receives MNC Wine.app
 #   --d3d-dir      output of import-gptk.sh (DXMT, D3DMetal and the rest of the Direct3D set)
+#   --addons-dir   folder with mono/wine-mono-<version>-x86.msi and gecko/wine-gecko-<version>-<arch>.msi
 #   --w2s-dir      folder with win32swiftui.dll and win32swiftui.so (and i386/win32swiftui.dll), from the Win32-to-SwiftUI build
 #   --config-h     include/config.h of the build, to bundle the libraries Wine opens with dlopen
 #   --search       where to find the libraries to bundle (repeatable; default: the Homebrew prefix lib)
@@ -17,7 +18,7 @@
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
-install= version= out= d3d= w2s= config_h= icon= archive=0
+install= version= out= d3d= w2s= addons= config_h= icon= archive=0
 search=()
 while [ $# -gt 0 ]; do
   case $1 in
@@ -26,6 +27,7 @@ while [ $# -gt 0 ]; do
     --out)         out=$2; shift 2 ;;
     --d3d-dir)     d3d=$2; shift 2 ;;
     --w2s-dir)     w2s=$2; shift 2 ;;
+    --addons-dir)  addons=$2; shift 2 ;;
     --config-h)    config_h=$2; shift 2 ;;
     --search)      search+=("$2"); shift 2 ;;
     --icon)        icon=$2; shift 2 ;;
@@ -62,6 +64,14 @@ if [ -n "$w2s" ]; then
   cp -p "$w2s/win32swiftui.so"  "$arch_dir/x86_64-unix/"
   # 32-bit programs (installers, old games) get the layer too when the folder has it
   [ -f "$w2s/i386/win32swiftui.dll" ] && cp -p "$w2s/i386/win32swiftui.dll" "$arch_dir/i386-windows/"
+fi
+
+# Wine Mono and Wine Gecko, as the installers wine looks for in share/wine/mono and share/wine/gecko:
+# a new prefix then sets them up from the application instead of asking to download them
+if [ -n "$addons" ]; then
+  for d in mono gecko; do
+    [ -d "$addons/$d" ] && mkdir -p "$res/wine/share/wine/$d" && cp -p "$addons/$d"/*.msi "$res/wine/share/wine/$d/"
+  done
 fi
 
 # launcher and Info.plist
