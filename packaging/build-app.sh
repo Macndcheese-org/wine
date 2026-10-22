@@ -52,6 +52,8 @@ cp -Rp "$install" "$res/wine"
 arch_dir=$res/wine/lib/wine
 if [ -n "$d3d" ]; then
   cp -p "$d3d"/windows/*.dll "$arch_dir/x86_64-windows/"
+  # the unix side of DXMT (winemetal.so, winemetal9.so)
+  [ -d "$d3d/unix" ] && cp -p "$d3d"/unix/*.so "$arch_dir/x86_64-unix/"
   mkdir -p "$res/wine/lib/external"
   cp -Rp "$d3d"/external/. "$res/wine/lib/external/"
 fi
