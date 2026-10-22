@@ -56,6 +56,8 @@ if [ -n "$d3d" ]; then
   cp -p "$d3d"/windows/*.dll "$arch_dir/x86_64-windows/"
   # the unix side of DXMT (winemetal.so, winemetal9.so)
   [ -d "$d3d/unix" ] && cp -p "$d3d"/unix/*.so "$arch_dir/x86_64-unix/"
+  # the 32-bit side of winemetal (a 32-bit DXMT d3d9 reaches the unix library through it)
+  [ -d "$d3d/windows32" ] && cp -p "$d3d"/windows32/*.dll "$arch_dir/i386-windows/"
   mkdir -p "$res/wine/lib/external"
   cp -Rp "$d3d"/external/. "$res/wine/lib/external/"
 fi
