@@ -911,6 +911,13 @@ static void parse_command_line(LPWSTR commandline,parameters_struct *parameters)
     }
 }
 
+/* MNC Win32-to-SwiftUI: a folder asked of explorer.exe is shown by the Finder when the native UI is on */
+static BOOL open_in_finder(const WCHAR *path)
+{
+    BOOL (WINAPI *open_folder)(const WCHAR *) = (void *)GetProcAddress(GetModuleHandleW(L"user32.dll"), "W2SOpenFolder");
+    return open_folder && open_folder(path);
+}
+
 int WINAPI wWinMain(HINSTANCE hinstance,
                     HINSTANCE previnstance,
                     LPWSTR cmdline,
@@ -930,6 +937,8 @@ int WINAPI wWinMain(HINSTANCE hinstance,
         ERR( "Could not initialize COM\n" );
         ExitProcess(EXIT_FAILURE);
     }
+    if(parameters.root[0] && !parameters.selection[0] && PathIsDirectoryW(parameters.root) && open_in_finder(parameters.root))
+        ExitProcess(EXIT_SUCCESS);
     if(parameters.root[0] && !PathIsDirectoryW(parameters.root))
         if(ShellExecuteW(NULL,NULL,parameters.root,NULL,NULL,SW_SHOWDEFAULT) > (HINSTANCE)32)
             ExitProcess(EXIT_SUCCESS);

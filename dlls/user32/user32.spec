@@ -1230,3 +1230,4 @@
 @ varargs wsprintfW(wstr wstr)
 @ stdcall wvsprintfA(ptr str ptr)
 @ stdcall wvsprintfW(ptr wstr ptr)
+@ stdcall W2SOpenFolder(wstr)
