@@ -27,6 +27,7 @@ static INIT_ONCE w2s_once = INIT_ONCE_STATIC_INIT;
 static void (WINAPI *pW2SWindowCreated)( HWND hwnd );
 static BOOL (WINAPI *pW2SMessageBox)( const MSGBOXPARAMSW *params, INT *ret );
 static BOOL (WINAPI *pW2STrackPopupMenu)( HMENU menu, UINT flags, INT x, INT y, HWND hwnd, TPMPARAMS *params, INT *ret );
+static BOOL (WINAPI *pW2SDrawIcon)( HDC hdc, INT x, INT y, HICON icon, INT cx, INT cy, UINT step, HBRUSH brush, UINT flags );
 
 static int bool_value( const WCHAR *value )
 {
@@ -94,6 +95,7 @@ static BOOL CALLBACK w2s_init( INIT_ONCE *once, void *param, void **context )
     pW2SWindowCreated = (void *)GetProcAddress( module, "W2SWindowCreated" );
     pW2SMessageBox = (void *)GetProcAddress( module, "W2SMessageBox" );
     pW2STrackPopupMenu = (void *)GetProcAddress( module, "W2STrackPopupMenu" );
+    pW2SDrawIcon = (void *)GetProcAddress( module, "W2SDrawIcon" );
     TRACE( "win32swiftui.dll loaded: %p %p\n", pW2SWindowCreated, pW2SMessageBox );
     return TRUE;
 }
@@ -114,4 +116,11 @@ BOOL w2s_track_popup_menu( HMENU menu, UINT flags, INT x, INT y, HWND hwnd, TPMP
 {
     InitOnceExecuteOnce( &w2s_once, w2s_init, NULL, NULL );
     return pW2STrackPopupMenu && pW2STrackPopupMenu( menu, flags, x, y, hwnd, params, ret );
+}
+
+/* DrawIconEx of one of wine's shell32 icons draws the macOS image of the same meaning (icons.c of the runtime) */
+BOOL w2s_draw_icon( HDC hdc, INT x, INT y, HICON icon, INT cx, INT cy, UINT step, HBRUSH brush, UINT flags )
+{
+    InitOnceExecuteOnce( &w2s_once, w2s_init, NULL, NULL );
+    return pW2SDrawIcon && pW2SDrawIcon( hdc, x, y, icon, cx, cy, step, brush, flags );
 }

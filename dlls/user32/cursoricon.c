@@ -1595,6 +1595,15 @@ BOOL WINAPI DrawIcon( HDC hdc, INT x, INT y, HICON hIcon )
 }
 
 /***********************************************************************
+ *		DrawIconEx (USER32.@)
+ */
+BOOL WINAPI DrawIconEx( HDC hdc, INT x, INT y, HICON icon, INT cx, INT cy, UINT step, HBRUSH brush, UINT flags )
+{
+    if (w2s_draw_icon( hdc, x, y, icon, cx, cy, step, brush, flags )) return TRUE; /* MNC Win32-to-SwiftUI */
+    return NtUserDrawIconEx( hdc, x, y, icon, cx, cy, step, brush, flags );
+}
+
+/***********************************************************************
  *		SetSystemCursor (USER32.@)
  */
 BOOL WINAPI SetSystemCursor(HCURSOR hcur, DWORD id)
