@@ -174,6 +174,9 @@ jobs:
         run: |
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           TITLE="build: ${{ github.ref_name }} failed to build (${{ github.sha }})"
+          # gh issue create fails when a label does not exist; a fork starts with the default ones only
+          gh label create build-failure --repo "${{ github.repository }}" --color D73A4A --force
+          gh label create automated --repo "${{ github.repository }}" --color 6A737D --force
           gh issue create --repo "${{ github.repository }}" \
             --title "$TITLE" \
             --label "build-failure,automated" \

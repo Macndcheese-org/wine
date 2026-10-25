@@ -91,6 +91,21 @@ def resolve(dep, requester, search_dirs):
     return find_library(base, search_dirs)
 
 
+def found_by_rpath(dep, requester):
+    """True when an @rpath/ name leads to a file through the run paths of the requester.
+
+    Wine's unix libraries name each other (@rpath/ntdll.so, @rpath/win32u.so) and carry the run
+    path @loader_path/, so the library they need is the one next to them in the install tree.
+    """
+    name = dep[len("@rpath/"):]
+    here = os.path.dirname(os.path.realpath(requester))
+    for r in rpaths(requester):
+        base = os.path.normpath(r.replace("@loader_path", here).replace("@executable_path", here))
+        if os.path.exists(os.path.join(base, name)):
+            return True
+    return False
+
+
 def soname_seeds(config_h):
     names = []
     with open(config_h) as f:
@@ -128,8 +143,10 @@ def main():
             return
         src = resolve(dep, requester, args.search)
         if not src:
-            if not dep.startswith("@rpath/") or not find_library(os.path.basename(dep), [libdir]):
-                missing.append((dep, requester))
+            if dep.startswith("@rpath/") and (find_library(os.path.basename(dep), [libdir])
+                                              or found_by_rpath(dep, requester)):
+                return
+            missing.append((dep, requester))
             return
         if src.startswith(libdir + os.sep) or src.startswith(prefix + os.sep):
             return
