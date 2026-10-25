@@ -18,7 +18,8 @@
 	<string>@VERSION@</string>
 	<key>CFBundleVersion</key>
 	<string>@VERSION@</string>
-	@ICON_ENTRY@
+	<key>CFBundleIconFile</key>
+	<string>MNCWine</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.developer-tools</string>
 	<key>LSMinimumSystemVersion</key>
@@ -41,6 +42,8 @@
 				<string>bat</string>
 				<string>lnk</string>
 			</array>
+			<key>CFBundleTypeIconFile</key>
+			<string>MNCWine</string>
 			<key>CFBundleTypeRole</key>
 			<string>Viewer</string>
 			<key>LSHandlerRank</key>

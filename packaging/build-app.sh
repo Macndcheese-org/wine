@@ -12,7 +12,7 @@
 #   --rosetta-dir  folder with runtime_loader and libRuntimeRosettax87 from rosettax87_jit (the x87 JIT, on by default for 32-bit programs)
 #   --config-h     include/config.h of the build, to bundle the libraries Wine opens with dlopen
 #   --search       where to find the libraries to bundle (repeatable; default: the Homebrew prefix lib)
-#   --icon         .icns file for the application (optional)
+#   --icon         .icns file for the application (default: launcher/winehq.icns, the Wine logo of the WineHQ application)
 #   --archive      also write MNC-Wine-<version>-osx64.tar.xz next to the application
 #
 # The bundle is checked at the end with verify-app.py; the script fails if the check does.
@@ -93,12 +93,11 @@ fi
 # launcher and Info.plist
 clang -arch x86_64 -arch arm64 -mmacosx-version-min=11.0 -fobjc-arc -O2 \
   -framework Cocoa "$here/launcher/main.m" -o "$app/Contents/MacOS/MNC Wine"
-icon_entry=
-if [ -n "$icon" ]; then
-  cp "$icon" "$res/MNCWine.icns"
-  icon_entry='<key>CFBundleIconFile</key><string>MNCWine</string>'
-fi
-sed -e "s|@VERSION@|$version|g" -e "s|@ICON_ENTRY@|$icon_entry|" "$here/launcher/Info.plist.in" > "$app/Contents/Info.plist"
+# the welcome text shown in Terminal (winehelp, appdb), as in the WineHQ application
+cp -Rp "$here/launcher/start" "$res/start"
+# the icon: the Wine logo shipped by the WineHQ application unless --icon says otherwise
+cp "${icon:-$here/launcher/winehq.icns}" "$res/MNCWine.icns"
+sed -e "s|@VERSION@|$version|g" "$here/launcher/Info.plist.in" > "$app/Contents/Info.plist"
 plutil -lint "$app/Contents/Info.plist"
 
 # third-party libraries, inside the bundle, found through run paths

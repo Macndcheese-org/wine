@@ -3,7 +3,8 @@
 Turns a build of this tree into **MNC Wine.app**, the application that is released as
 `MNC-Wine-<version>-osx64.tar.xz`.
 
-Opening the application opens Terminal with `wine` first in `PATH`, as Wine Staging does.
+Opening the application opens Terminal with `wine` first in `PATH` and the welcome text of the WineHQ
+application ("Wine Is Not an Emulator", how to run `.exe` and `.msi`, `winecfg`, `appdb`).
 Opening a Windows program with it runs the program. Direct3D 9 to 11 programs run on DXMT and
 Direct3D 12 programs on D3DMetal (GPTK), unless `MNC_GRAPHICS_ENGINE` says otherwise (see below). The
 Win32-to-SwiftUI layer is on unless `MNC_NATIVE_UI=0`.
@@ -12,7 +13,7 @@ Win32-to-SwiftUI layer is on unless `MNC_NATIVE_UI=0`.
 
 | File | What it does |
 | --- | --- |
-| `launcher/` | The program inside the bundle that opens Terminal or runs a program, and its `Info.plist`. |
+| `launcher/` | The program inside the bundle that opens Terminal or runs a program, and its `Info.plist`. `launcher/start/bin/winehelp` (the welcome text) and `appdb`, and `launcher/winehq.icns` (the Wine logo), are the files of the WineHQ application (LGPL, headers kept); `build-app.sh --icon` replaces the icon. |
 | `bundle-dylibs.py` | Copies the third-party libraries into the bundle and points every binary at them with `@rpath`. Removes every absolute run path. |
 | `verify-app.py` | Fails when the bundle still depends on the machine that built it (Homebrew, `/usr/local`, `DYLD_*`, bare-name `dlopen`, bad signature). |
 | `import-gptk.sh` | Builds the Direct3D set from a GPTK image and the `mnc-d3d` package. |

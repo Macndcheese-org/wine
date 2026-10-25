@@ -11,6 +11,8 @@ Fails (exit status 1) when anything in it still depends on the machine it was bu
     DYLD_FALLBACK_LIBRARY_PATH, that is /usr/local/lib, that is Homebrew;
   * DYLD_* variables are set by the launcher or by any script of the bundle;
   * the bundle holds an unsigned or invalidly signed binary;
+  * the Terminal welcome text (Contents/Resources/start/bin/winehelp, appdb) or the icon named by Info.plist is missing, or
+    the launcher no longer runs winehelp (the application then opens Terminal without the WineHQ banner);
   * the 64-bit Direct3D files of one backend (d3d11_dxmt.dll, ...) sit next to an unsuffixed d3d11.dll,
     dxgi.dll or d3d10core.dll: Wine would load that one instead (see check_d3d_names).
 
@@ -19,6 +21,7 @@ Environment: OTOOL and CODESIGN override the tools.
 """
 
 import os
+import plistlib
 import re
 import subprocess
 import sys
@@ -179,6 +182,32 @@ def check_d3d_names(app):
                 fail("lib/wine/x86_64-windows/%s.dll hides %s_%s.dll: Wine loads it instead" % (module, module, backend))
 
 
+def check_launcher(app):
+    """Opening the application must behave like the WineHQ one: Terminal shows the welcome text of
+    start/bin/winehelp with start/bin in PATH, and the application has an icon."""
+    res = os.path.join(app, "Contents/Resources")
+    for script in ("winehelp", "appdb"):
+        path = os.path.join(res, "start/bin", script)
+        if not os.access(path, os.X_OK):
+            fail("Contents/Resources/start/bin/%s is missing or not executable" % script)
+    with open(os.path.join(app, "Contents/Info.plist"), "rb") as f:
+        info = plistlib.load(f)
+    icon = info.get("CFBundleIconFile")
+    if not icon:
+        fail("Info.plist has no CFBundleIconFile")
+    elif not os.path.isfile(os.path.join(res, icon if icon.endswith(".icns") else icon + ".icns")):
+        fail("the icon %s named by Info.plist is not in Contents/Resources" % icon)
+    launcher = os.path.join(app, "Contents/MacOS", info.get("CFBundleExecutable", ""))
+    if not os.path.isfile(launcher):
+        fail("the launcher Contents/MacOS/%s is missing" % info.get("CFBundleExecutable"))
+        return
+    with open(launcher, "rb") as f:
+        data = f.read()
+    for needle in (b"winehelp --clear", b"start/bin"):
+        if needle not in data:
+            fail("the launcher does not mention %s" % needle.decode())
+
+
 def main():
     app = sys.argv[1] if len(sys.argv) > 1 else None
     if not app or not os.path.isdir(app):
@@ -199,6 +228,7 @@ def main():
                 if os.path.getsize(path) < 64 * 1024 * 1024:
                     check_bytes(path, rel, macho)
     check_d3d_names(app)
+    check_launcher(app)
     for n in notes:
         print("note", n)
     for e in errors:

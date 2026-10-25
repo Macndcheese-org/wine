@@ -72,6 +72,10 @@ def rpaths(path):
             for i, line in enumerate(out) if line.strip() == "cmd LC_RPATH"]
 
 
+def signed(path):
+    return subprocess.run((CODESIGN, "--verify", "--strict", path), capture_output=True).returncode == 0
+
+
 def is_system(dep):
     return dep.startswith(SYSTEM_PREFIXES)
 
@@ -195,15 +199,19 @@ def main():
         for old in dict.fromkeys(have):                    # nothing absolute may stay
             if not old.startswith(("@loader_path", "@executable_path")):
                 changes += ["-delete_rpath", old]
-        if wanted not in have:
+        # A binary that links nothing but system libraries needs no run path: libRuntimeRosettax87 is a
+        # static executable with no room for a new load command.
+        if wanted not in have and any(not is_system(d) for d in dependencies(b)):
             changes += ["-add_rpath", wanted]
         if changes:
             try:
                 run(INSTALL_NAME_TOOL, *changes, b)
             except subprocess.CalledProcessError as e:
                 sys.exit("install_name_tool failed on %s: %s" % (b, e.stderr.strip()))
-            if not args.no_sign:
-                run(CODESIGN, "--force", "--sign", "-", b)
+        # What the linker or install left unsigned or invalid is signed as well, except
+        # libRuntimeRosettax87, which runtime_loader injects as it is.
+        if not args.no_sign and (changes or (os.path.basename(b) != "libRuntimeRosettax87" and not signed(b))):
+            run(CODESIGN, "--force", "--sign", "-", b)
 
     for dep, requester in missing:
         print("error: %s (needed by %s) not found" % (dep, os.path.relpath(requester, prefix)), file=sys.stderr)
