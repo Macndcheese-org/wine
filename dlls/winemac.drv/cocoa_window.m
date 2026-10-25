@@ -4030,6 +4030,27 @@ void macdrv_view_release_metal_view(WineMetalView *view)
 
 @end
 
+/* CALayerHost shows the exported layer at its own size, but the renderer only sets drawableSize
+ * when the window is resized (KVO on it does not fire), so the bounds follow it here. */
+@interface WineRemoteMetalLayer : CAMetalLayer
+@end
+
+@implementation WineRemoteMetalLayer
+
+- (void) setDrawableSize:(CGSize)size
+{
+    CGFloat scale = self.contentsScale > 0 ? self.contentsScale : 1.0;
+
+    [super setDrawableSize:size];
+
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    [self setBounds:CGRectMake(0, 0, size.width / scale, size.height / scale)];
+    [CATransaction commit];
+}
+
+@end
+
 @interface CAContextSwapChain : NSObject <WineMetalSwapChain>
 {
     void* hwnd;
@@ -4057,7 +4078,7 @@ void macdrv_view_release_metal_view(WineMetalView *view)
         return nil;
     }
 
-    offscreen_layer = [[CAMetalLayer alloc] init];
+    offscreen_layer = [[WineRemoteMetalLayer alloc] init];
     if (!offscreen_layer)
     {
         macdrv_release_metal_device(device);
@@ -4171,6 +4192,27 @@ void macdrv_window_release_ca_layer_host_view(WineWindow *window, unsigned int c
 
         if ([content_view isKindOfClass:[WineContentView class]])
             [(WineContentView*)content_view removeCALayerHostView:context_id];
+    });
+}
+}
+
+void macdrv_view_create_ca_layer_host(WineContentView *view, unsigned int context_id)
+{
+@autoreleasepool
+{
+    OnMainThread(^{
+        view.wantsLayer = YES;
+        [view addCALayerHostViewWithContextId:context_id];
+    });
+}
+}
+
+void macdrv_view_release_ca_layer_host(WineContentView *view, unsigned int context_id)
+{
+@autoreleasepool
+{
+    OnMainThread(^{
+        [view removeCALayerHostView:context_id];
     });
 }
 }
