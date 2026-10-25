@@ -128,6 +128,10 @@ def check_macho(path, rel):
         else:
             fail("%s: links %s outside the bundle" % (rel, lib))
     if sys.platform == "darwin" or os.environ.get("CODESIGN"):
+        # runtime_loader reads libRuntimeRosettax87 from disk and injects it as it is, so it is
+        # unsigned in rosettax87_jit and must stay that way
+        if os.path.basename(path) == "libRuntimeRosettax87":
+            return
         if run(CODESIGN, "--verify", "--strict", path).returncode:
             fail("%s: signature missing or invalid" % rel)
 

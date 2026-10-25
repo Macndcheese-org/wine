@@ -9,6 +9,7 @@
 #   --d3d-dir      output of import-gptk.sh (DXMT, D3DMetal and the rest of the Direct3D set)
 #   --addons-dir   folder with mono/wine-mono-<version>-x86.msi and gecko/wine-gecko-<version>-<arch>.msi
 #   --w2s-dir      folder with win32swiftui.dll and win32swiftui.so (and i386/win32swiftui.dll), from the Win32-to-SwiftUI build
+#   --rosetta-dir  folder with runtime_loader and libRuntimeRosettax87 from rosettax87_jit (the x87 JIT, on by default for 32-bit programs)
 #   --config-h     include/config.h of the build, to bundle the libraries Wine opens with dlopen
 #   --search       where to find the libraries to bundle (repeatable; default: the Homebrew prefix lib)
 #   --icon         .icns file for the application (optional)
@@ -18,7 +19,7 @@
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
-install= version= out= d3d= w2s= addons= config_h= icon= archive=0
+install= version= out= d3d= w2s= addons= rosetta= config_h= icon= archive=0
 search=()
 while [ $# -gt 0 ]; do
   case $1 in
@@ -28,6 +29,7 @@ while [ $# -gt 0 ]; do
     --d3d-dir)     d3d=$2; shift 2 ;;
     --w2s-dir)     w2s=$2; shift 2 ;;
     --addons-dir)  addons=$2; shift 2 ;;
+    --rosetta-dir) rosetta=$2; shift 2 ;;
     --config-h)    config_h=$2; shift 2 ;;
     --search)      search+=("$2"); shift 2 ;;
     --icon)        icon=$2; shift 2 ;;
@@ -35,7 +37,7 @@ while [ $# -gt 0 ]; do
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
 done
-[ -n "$install" ] && [ -n "$version" ] && [ -n "$out" ] || { sed -n '2,16p' "$0"; exit 2; }
+[ -n "$install" ] && [ -n "$version" ] && [ -n "$out" ] || { sed -n '2,17p' "$0"; exit 2; }
 [ -x "$install/bin/wine" ] || { echo "$install/bin/wine is missing" >&2; exit 1; }
 if [ ${#search[@]} -eq 0 ]; then
   if command -v brew >/dev/null; then search=("$(brew --prefix)/lib"); else search=(/usr/local/lib); fi
@@ -60,6 +62,12 @@ if [ -n "$d3d" ]; then
   [ -d "$d3d/windows32" ] && cp -p "$d3d"/windows32/*.dll "$arch_dir/i386-windows/"
   mkdir -p "$res/wine/lib/external"
   cp -Rp "$d3d"/external/. "$res/wine/lib/external/"
+fi
+if [ -n "$rosetta" ]; then
+  # found by ntdll at <prefix>/lib/mnc-rosetta/runtime_loader when ROSETTA_X87_PATH is not set
+  mkdir -p "$res/wine/lib/mnc-rosetta"
+  cp -p "$rosetta/runtime_loader" "$rosetta/libRuntimeRosettax87" "$res/wine/lib/mnc-rosetta/"
+  for f in LICENSE VERSION; do [ -f "$rosetta/$f" ] && cp -p "$rosetta/$f" "$res/wine/lib/mnc-rosetta/"; done
 fi
 if [ -n "$w2s" ]; then
   cp -p "$w2s/win32swiftui.dll" "$arch_dir/x86_64-windows/"
