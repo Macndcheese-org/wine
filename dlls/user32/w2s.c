@@ -6,7 +6,7 @@
  * SwiftUI views, and MessageBox is offered to it before wine's own dialog.
  * With the switch off, or without the DLL, nothing here does anything.
  *
- * The switch is on by default. Turn it off with WINE_MNC_NATIVE_UI=0 in the
+ * The switch is on by default. Turn it off with MNC_NATIVE_UI=0 in the
  * environment, or HKCU\Software\Wine\Mac Driver\NativeUI = "n", overridable per
  * program under HKCU\Software\Wine\AppDefaults\<program.exe>\Mac Driver.
  * Wine's own background processes stay off unless a setting names them.
@@ -66,7 +66,7 @@ static BOOL w2s_enabled(void)
     WCHAR value[8], module[MAX_PATH], path[MAX_PATH + 64], *exe = NULL;
     int on;
 
-    if (GetEnvironmentVariableW( L"WINE_MNC_NATIVE_UI", value, ARRAY_SIZE(value) ) &&
+    if (GetEnvironmentVariableW( L"MNC_NATIVE_UI", value, ARRAY_SIZE(value) ) &&
         (on = bool_value( value )) != -1)
         return on;
 

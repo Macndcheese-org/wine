@@ -12,7 +12,7 @@
  * not enough to show them, as large as they need), never past the work area. The program's layout
  * is then checked to have followed: if it did not, the window gets its size back.
  *
- * The check is off with WINE_MNC_FIT_WINDOW=0 in the environment, or HKCU\Software\Wine\Mac Driver\
+ * The check is off with MNC_FIT_WINDOW=0 in the environment, or HKCU\Software\Wine\Mac Driver\
  * FitWindow = "n", overridable per program under HKCU\Software\Wine\AppDefaults\<program.exe>\Mac Driver.
  */
 
@@ -68,7 +68,7 @@ static BOOL CALLBACK fit_init( INIT_ONCE *once, void *param, void **context )
     int on;
 
     fit_on = TRUE;
-    if (GetEnvironmentVariableW( L"WINE_MNC_FIT_WINDOW", value, ARRAY_SIZE(value) ) &&
+    if (GetEnvironmentVariableW( L"MNC_FIT_WINDOW", value, ARRAY_SIZE(value) ) &&
         (on = bool_value( value )) != -1)
     {
         fit_on = on;

@@ -5,8 +5,8 @@ Turns a build of this tree into **MNC Wine.app**, the application that is releas
 
 Opening the application opens Terminal with `wine` first in `PATH`, as Wine Staging does.
 Opening a Windows program with it runs the program. Direct3D 9 to 11 programs run on DXMT and
-Direct3D 12 programs on D3DMetal (GPTK), unless `MNC_GAME_BACKEND` says otherwise (see below). The
-Win32-to-SwiftUI layer is on unless `WINE_MNC_NATIVE_UI=0`.
+Direct3D 12 programs on D3DMetal (GPTK), unless `MNC_GRAPHICS_ENGINE` says otherwise (see below). The
+Win32-to-SwiftUI layer is on unless `MNC_NATIVE_UI=0`.
 
 ## What is in this directory
 
@@ -48,11 +48,11 @@ packaging/build-app.sh --install-dir dist/opt/mnc-wine --d3d-dir d3d-set --w2s-d
 
 ## Direct3D backend choice
 
-* `MNC_GAME_BACKEND=d3dmetal|dxmt|dxvk|vr|opengl` (set by the backend app for every launch) decides, as before.
+* `MNC_GRAPHICS_ENGINE=d3dmetal|dxmt|dxvk|vr|opengl` (set by the backend app for every launch) decides, as before.
 * Without it, a 64-bit program gets DXMT, unless it imports `d3d12.dll` (also delay-imported) or has
   `D3D12Core.dll` next to it, in which case it gets D3DMetal. 32-bit programs keep Wine's own d3d.
-  A program that loads `d3d12.dll` later with `LoadLibrary` must be started with `MNC_GAME_BACKEND=d3dmetal`.
-* To run one program on GPTK instead: `MNC_GAME_BACKEND=d3dmetal wine program.exe`.
+  A program that loads `d3d12.dll` later with `LoadLibrary` must be started with `MNC_GRAPHICS_ENGINE=d3dmetal`.
+* To run one program on GPTK instead: `MNC_GRAPHICS_ENGINE=d3dmetal wine program.exe`.
 * The 64-bit `lib/wine/x86_64-windows` holds no unsuffixed `d3d11.dll`, `dxgi.dll` or `d3d10core.dll`. Wine finds
   the builtin of `d3d11_dxmt.dll` (and of `d3d11_d3dm.dll`) by the name written inside the file, `d3d11.dll`, so an
   unsuffixed file of that name would be loaded in their place: before this was fixed every program that was sent to

@@ -70,7 +70,7 @@ if [ -n "$d3d" ]; then
   cp -Rp "$d3d"/external/. "$res/wine/lib/external/"
 fi
 if [ -n "$rosetta" ]; then
-  # found by ntdll at <prefix>/lib/mnc-rosetta/runtime_loader when ROSETTA_X87_PATH is not set
+  # found by ntdll at <prefix>/lib/mnc-rosetta/runtime_loader when MNC_X87_LOADER_PATH is not set
   mkdir -p "$res/wine/lib/mnc-rosetta"
   cp -p "$rosetta/runtime_loader" "$rosetta/libRuntimeRosettax87" "$res/wine/lib/mnc-rosetta/"
   for f in LICENSE VERSION; do [ -f "$rosetta/$f" ] && cp -p "$rosetta/$f" "$res/wine/lib/mnc-rosetta/"; done

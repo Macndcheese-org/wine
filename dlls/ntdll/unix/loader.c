@@ -466,11 +466,11 @@ char *get_alternate_wineloader( WORD machine )
 }
 
 
-/* MNC: RosettaHack x87 + JIT (ROSETTA_X87_PATH).
+/* MNC: RosettaHack x87 + JIT (MNC_X87_LOADER_PATH).
  *
  * Rosetta emulates x87 through a slow generic path, which dominates the frame
  * time of older 32-bit titles -- they do their float maths on the x87 stack,
- * not in SSE.  ROSETTA_X87_PATH names an external loader (rosettax87_jit's
+ * not in SSE.  MNC_X87_LOADER_PATH names an external loader (rosettax87_jit's
  * runtime_loader) that patches Rosetta's x87 handlers in the target process and
  * then execs it.  We hand it the wine loader in place of exec'ing that
  * ourselves, so the whole wine process -- and every PE thread in it -- runs on
@@ -535,16 +535,16 @@ static BOOL is_wine_debugger( const char *name )
 static BOOL is_translated_process(void);
 
 /* MNC: the x87 JIT is on by default for 32-bit processes.  The loader is
- * ROSETTA_X87_PATH when that is set (an empty value switches it off), otherwise the
- * runtime_loader shipped in <prefix>/lib/mnc-rosetta; WINE_X87_JIT=0 switches it off
+ * MNC_X87_LOADER_PATH when that is set (an empty value switches it off), otherwise the
+ * runtime_loader shipped in <prefix>/lib/mnc-rosetta; MNC_X87_JIT=0 switches it off
  * for one run.  Only inside a Rosetta-translated process: on an Intel Mac there is
  * nothing to patch.  The decision is taken before the registry is reachable, so a
  * per-application switch has to be the environment variable. */
 static const char *get_rosetta_x87_path(void)
 {
     static char *default_path;
-    const char *path = getenv( "ROSETTA_X87_PATH" );
-    const char *off = getenv( "WINE_X87_JIT" );
+    const char *path = getenv( "MNC_X87_LOADER_PATH" );
+    const char *off = getenv( "MNC_X87_JIT" );
 
     if (off && off[0] == '0') return NULL;
     if (path) return path[0] ? path : NULL;
