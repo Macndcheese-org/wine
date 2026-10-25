@@ -11,23 +11,22 @@ name: Build and Release
 # files that are not in this repository; packaging/README.md describes how the complete release is
 # assembled from this build with packaging/import-gptk.sh and packaging/build-app.sh.
 #
-# A branch push builds and keeps the result as a run artifact.  A release is made only for a tag
-# of the form 11.20.0 (or by running the workflow by hand and asking for it).
+# A push to a branch builds and keeps the result as a run artifact.  A push to RELEASE_BRANCH also
+# publishes it as the pre-release "MacNdCheese Wine 11.20.0" (packaging/prerelease.sh): the next
+# build replaces it until the release is marked as stable on GitHub, and the builds after that
+# publish 11.20.1, and so on.
 
 on:
   push:
     branches: ['mnc-**']
-    tags: ['[0-9]+.[0-9]+.[0-9]+']
   workflow_dispatch:
-    inputs:
-      publish:
-        description: 'Create a GitHub release from this build'
-        type: boolean
-        default: false
 
 permissions:
   contents: write
   issues: write
+
+env:
+  RELEASE_BRANCH: mnc-11.20
 
 concurrency:
   group: build-release-${{ github.ref }}
@@ -117,12 +116,19 @@ jobs:
       - name: Build
         run: make -C build64 -j"$(sysctl -n hw.ncpu)"
 
+      - name: Release number
+        id: number
+        if: ${{ github.ref_name == env.RELEASE_BRANCH }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "tag=$(packaging/prerelease.sh tag)" >> "$GITHUB_OUTPUT"
+
       - name: Package
         id: package
         run: |
-          # 11.20.0 for a tag, otherwise the wine version with the commit
-          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then VERSION="$GITHUB_REF_NAME"
-          else VERSION="$(grep -o '[0-9][0-9.]*' VERSION | head -1).0-$(git rev-parse --short HEAD)"; fi
+          # 11.20.0 on the release branch, otherwise the wine version with the commit
+          VERSION="${{ steps.number.outputs.tag }}"
+          [ -n "$VERSION" ] || VERSION="$(grep -o '[0-9][0-9.]*' VERSION | head -1).0-$(git rev-parse --short HEAD)"
 
           make -C build64 install DESTDIR="$GITHUB_WORKSPACE/dist"
           packaging/build-app.sh \
@@ -150,16 +156,11 @@ jobs:
           path: build64/config.log
           retention-days: 7
 
-      - name: Create release
-        if: ${{ github.ref_type == 'tag' || inputs.publish }}
+      - name: Publish the pre-release
+        if: ${{ github.ref_name == env.RELEASE_BRANCH }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release create "${{ steps.package.outputs.version }}" \
-            "out/${{ steps.package.outputs.asset }}" \
-            --repo "${{ github.repository }}" \
-            --title "MNC Wine ${{ steps.package.outputs.version }}" \
-            --notes "Built from $(git log -1 --format='%H') ($(git log -1 --format='%s'))."
+        run: packaging/prerelease.sh publish "${{ steps.number.outputs.tag }}" "out/${{ steps.package.outputs.asset }}"
 
   on-failure:
     needs: build
