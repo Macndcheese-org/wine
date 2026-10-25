@@ -532,11 +532,36 @@ static BOOL is_wine_debugger( const char *name )
     return !strncmp( p, "winedbg", 7 );
 }
 
+static BOOL is_translated_process(void);
+
+/* MNC: the x87 JIT is on by default for 32-bit processes.  The loader is
+ * ROSETTA_X87_PATH when that is set (an empty value switches it off), otherwise the
+ * runtime_loader shipped in <prefix>/lib/mnc-rosetta; WINE_X87_JIT=0 switches it off
+ * for one run.  Only inside a Rosetta-translated process: on an Intel Mac there is
+ * nothing to patch.  The decision is taken before the registry is reachable, so a
+ * per-application switch has to be the environment variable. */
+static const char *get_rosetta_x87_path(void)
+{
+    static char *default_path;
+    const char *path = getenv( "ROSETTA_X87_PATH" );
+    const char *off = getenv( "WINE_X87_JIT" );
+
+    if (off && off[0] == '0') return NULL;
+    if (path) return path[0] ? path : NULL;
+    if (!default_path && dll_dir && is_translated_process())
+    {
+        char *name;
+
+        asprintf( &name, "%s/../mnc-rosetta/runtime_loader", dll_dir );
+        if (name && !access( name, X_OK )) default_path = name;
+        else free( name );
+    }
+    return default_path;
+}
+
 static BOOL use_rosetta_x87_loader( WORD machine )
 {
-    const char *path = getenv( "ROSETTA_X87_PATH" );
-
-    return path && path[0] && machine == IMAGE_FILE_MACHINE_I386;
+    return machine == IMAGE_FILE_MACHINE_I386 && get_rosetta_x87_path();
 }
 
 /* The initial "wine /unix/path/app.exe" never goes through exec_wineloader(), so
@@ -545,7 +570,7 @@ static BOOL should_exec_initial_rosetta_loader( int argc, char *argv[] )
 {
     WORD machine;
 
-    if (!getenv( "ROSETTA_X87_PATH" ) || argc <= 1 || !argv[1]) return FALSE;
+    if (!get_rosetta_x87_path() || argc <= 1 || !argv[1]) return FALSE;
     if (!get_initial_unix_pe_machine( argv[1], &machine )) return FALSE;
     return use_rosetta_x87_loader( machine );
 }
@@ -592,7 +617,7 @@ static void preloader_exec( char **argv, BOOL rosetta_x87 )
      * reexec_loader, the windows one from exec_wineloader. */
     if (rosetta_x87 && argv[2] && is_wine_debugger( argv[2] )) rosetta_x87 = FALSE;
 
-    if (rosetta_x87 && (path = getenv( "ROSETTA_X87_PATH" )) && path[0])
+    if (rosetta_x87 && (path = get_rosetta_x87_path()))
     {
         stash_dyld_insert_libraries_for_rosetta_loader();
         argv[0] = strdup( path );
@@ -608,10 +633,22 @@ static void preloader_exec( char **argv, BOOL rosetta_x87 )
 static NTSTATUS loader_exec( char **argv, WORD machine, BOOL rosetta_x87 )
 {
     static char noexec[] = "WINELOADERNOEXEC=1";
+    char *alt;
 
     putenv( noexec );
 
-    if (((argv[1] = get_alternate_wineloader( machine )))) preloader_exec( argv, rosetta_x87 );
+    /* A wow64-only installation has no 32-bit unix loader (no i386-unix).  Exec'ing the missing file
+     * fails and falls through to wineloader below, but runtime_loader execs fine and then hangs on
+     * its missing target, so only hand out an alternate loader that is actually there. */
+    if ((alt = get_alternate_wineloader( machine )))
+    {
+        if (!access( alt, X_OK ))
+        {
+            argv[1] = alt;
+            preloader_exec( argv, rosetta_x87 );
+        }
+        free( alt );
+    }
 
     argv[1] = strdup( wineloader );
     preloader_exec( argv, rosetta_x87 );
