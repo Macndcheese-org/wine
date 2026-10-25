@@ -56,6 +56,12 @@ cp -Rp "$install" "$res/wine"
 arch_dir=$res/wine/lib/wine
 if [ -n "$d3d" ]; then
   cp -p "$d3d"/windows/*.dll "$arch_dir/x86_64-windows/"
+  # Wine finds the builtin of a file marked "Wine builtin DLL" by the name written inside the file,
+  # not by the name of the file: d3d11_dxmt.dll and d3d11_d3dm.dll both say "d3d11.dll". A d3d11.dll,
+  # dxgi.dll or d3d10core.dll left in this folder would be loaded in place of the file that was asked
+  # for (GPTK instead of DXMT, Wine's own d3d10core instead of DXMT's). 64-bit programs never ask for
+  # those names: ntdll sends them to the <name>_dxmt, <name>_d3dm, ... files, so they are not shipped.
+  for m in d3d11 dxgi d3d10core; do rm -f "$arch_dir/x86_64-windows/$m.dll"; done
   # the unix side of DXMT (winemetal.so, winemetal9.so)
   [ -d "$d3d/unix" ] && cp -p "$d3d"/unix/*.so "$arch_dir/x86_64-unix/"
   # the 32-bit side of winemetal (a 32-bit DXMT d3d9 reaches the unix library through it)

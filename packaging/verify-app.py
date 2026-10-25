@@ -10,7 +10,9 @@ Fails (exit status 1) when anything in it still depends on the machine it was bu
   * a library is opened by bare name (dlopen("libfoo.dylib")), which dyld resolves through
     DYLD_FALLBACK_LIBRARY_PATH, that is /usr/local/lib, that is Homebrew;
   * DYLD_* variables are set by the launcher or by any script of the bundle;
-  * the bundle holds an unsigned or invalidly signed binary.
+  * the bundle holds an unsigned or invalidly signed binary;
+  * the 64-bit Direct3D files of one backend (d3d11_dxmt.dll, ...) sit next to an unsuffixed d3d11.dll,
+    dxgi.dll or d3d10core.dll: Wine would load that one instead (see check_d3d_names).
 
 Usage: verify-app.py "MNC Wine.app"
 Environment: OTOOL and CODESIGN override the tools.
@@ -164,6 +166,19 @@ def check_bytes(path, rel, binary):
             fail("%s: mentions %s" % (rel, m.group(0).decode()))
 
 
+def check_d3d_names(app):
+    """The backend files are builtin DLLs renamed after their backend; Wine looks the builtin of
+    such a file up by the name inside it (d3d11.dll), so an unsuffixed builtin of that name wins."""
+    folder = os.path.join(app, "Contents/Resources/wine/lib/wine/x86_64-windows")
+    for module in ("d3d11", "dxgi", "d3d10core"):
+        plain = os.path.join(folder, module + ".dll")
+        if not os.path.exists(plain):
+            continue
+        for backend in ("dxmt", "d3dm", "dxvk", "opengl", "openxr"):
+            if os.path.exists(os.path.join(folder, "%s_%s.dll" % (module, backend))):
+                fail("lib/wine/x86_64-windows/%s.dll hides %s_%s.dll: Wine loads it instead" % (module, module, backend))
+
+
 def main():
     app = sys.argv[1] if len(sys.argv) > 1 else None
     if not app or not os.path.isdir(app):
@@ -183,6 +198,7 @@ def main():
             if macho or name.endswith((".sh", ".plist", ".command")) or (os.access(path, os.X_OK) and not is_pe(path)):
                 if os.path.getsize(path) < 64 * 1024 * 1024:
                     check_bytes(path, rel, macho)
+    check_d3d_names(app)
     for n in notes:
         print("note", n)
     for e in errors:

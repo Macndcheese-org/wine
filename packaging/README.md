@@ -52,3 +52,8 @@ packaging/build-app.sh --install-dir dist/opt/mnc-wine --d3d-dir d3d-set --w2s-d
 * Without it, a 64-bit program gets DXMT, unless it imports `d3d12.dll` (also delay-imported) or has
   `D3D12Core.dll` next to it, in which case it gets D3DMetal. 32-bit programs keep Wine's own d3d.
   A program that loads `d3d12.dll` later with `LoadLibrary` must be started with `MNC_GAME_BACKEND=d3dmetal`.
+* To run one program on GPTK instead: `MNC_GAME_BACKEND=d3dmetal wine program.exe`.
+* The 64-bit `lib/wine/x86_64-windows` holds no unsuffixed `d3d11.dll`, `dxgi.dll` or `d3d10core.dll`. Wine finds
+  the builtin of `d3d11_dxmt.dll` (and of `d3d11_d3dm.dll`) by the name written inside the file, `d3d11.dll`, so an
+  unsuffixed file of that name would be loaded in their place: before this was fixed every program that was sent to
+  DXMT, Steam included, ran on GPTK. `verify-app.py` fails if one comes back.
