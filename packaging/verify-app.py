@@ -31,12 +31,20 @@ BARE_DYLIB = re.compile(rb"(?<![\w/@.+-])(lib[\w+.-]*\.dylib)\0")
 DYLD_VAR = re.compile(rb"\bDYLD_[A-Z_]+")
 
 # Strings in Wine's own code that are not locations the bundle depends on.
-BARE_DYLIB_OK = set()
+BARE_DYLIB_OK = {                # (file, name): optional libraries that stay off when they are not there
+    # sdl2-compat, which Homebrew's sdl2 is, opens SDL3 by bare name; without it SDL stays off and
+    # winebus uses IOHID.  Bundling SDL3 would not help, dyld does not look for a bare name in @rpath.
+    ("libSDL2-2.0.0.dylib", "libSDL3.dylib"),
+}
+# The search directories that winegcc, widl and wrc try after their own (the same as in upstream Wine).
+LOCATION_OK = {(tool, loc) for tool in ("winegcc", "widl", "wrc") for loc in ("/usr/local/lib", "/usr/local/include")}
 DYLD_OK = {                      # ntdll.so points DYLD_LIBRARY_PATH at the build tree, only in a build tree
     ("ntdll.so", b"DYLD_LIBRARY_PATH"),
     ("ntdll.so", b"DYLD_INSERT_LIBRARIES"),
     ("ntdll.so", b"ROSETTA_X87_SAVED_DYLD_INSERT_LIBRARIES"),
 }
+
+THIRD_PARTY_DIR = "Contents/Resources/wine/lib"
 
 errors = []
 
@@ -101,23 +109,33 @@ def check_macho(path, rel):
             fail("%s: signature missing or invalid" % rel)
 
 
+def is_third_party(rel):
+    """A library that bundle-dylibs.py copied into <prefix>/lib."""
+    return os.path.dirname(rel) == THIRD_PARTY_DIR and rel.endswith(".dylib")
+
+
 def check_bytes(path, rel, binary):
     with open(path, "rb") as f:
         data = f.read()
     base = os.path.basename(path)
-    for m in BAD_LOCATION.finditer(data):
+    # What a third-party library has written into itself (the Cellar path of the machine that built
+    # it, the DYLD_LIBRARY_PATH of libltdl) are its default search and plugin directories, not
+    # libraries the bundle depends on.  Its load commands are checked by check_macho, and the
+    # libraries it opens by name below.
+    own = not is_third_party(rel)
+    for m in BAD_LOCATION.finditer(data) if own else ():
         text = m.group(0).decode()
         # a path of the machine that built it (debug info, assert strings) is harmless in the data
         # sections but not as a library location
-        if text.startswith(("/Users/",)):
+        if text.startswith(("/Users/",)) or (base, text) in LOCATION_OK:
             continue
         fail("%s: contains the location %s" % (rel, text))
         break
     if binary:
         for m in BARE_DYLIB.finditer(data):
-            if m.group(1).decode() not in BARE_DYLIB_OK:
+            if (base, m.group(1).decode()) not in BARE_DYLIB_OK:
                 fail("%s: opens %s by bare name (use an @rpath/ name)" % (rel, m.group(1).decode()))
-    for m in DYLD_VAR.finditer(data):
+    for m in DYLD_VAR.finditer(data) if own else ():
         if (base, m.group(0)) not in DYLD_OK:
             fail("%s: mentions %s" % (rel, m.group(0).decode()))
 
