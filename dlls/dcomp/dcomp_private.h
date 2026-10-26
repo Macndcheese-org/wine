@@ -84,6 +84,10 @@ struct composition_visual
     enum DCOMPOSITION_BORDER_MODE border_mode;
     enum DCOMPOSITION_BACKFACE_VISIBILITY visibility;
     float offset_x;
+    float offset_y;
+    D2D_MATRIX_3X2_F transform;
+    BOOL has_clip;
+    D2D_RECT_F clip;
     struct list child_visuals; /* visuals closer to head are lower in z-order */
     struct list entry;
     struct composition_visual *parent;

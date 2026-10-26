@@ -105,7 +105,9 @@ static HRESULT STDMETHODCALLTYPE visual_SetOffsetX(IDCompositionVisualUnknown *i
 
     TRACE("iface %p, offset_x %f.\n", iface, offset_x);
 
+    dcomp_lock();
     visual->offset_x = offset_x;
+    dcomp_unlock();
     return S_OK;
 }
 
@@ -118,22 +120,52 @@ static HRESULT STDMETHODCALLTYPE visual_SetOffsetYAnimation(IDCompositionVisualU
 
 static HRESULT STDMETHODCALLTYPE visual_SetOffsetY(IDCompositionVisualUnknown *iface, float offset_y)
 {
-    FIXME("iface %p, offset_y %f stub!\n", iface, offset_y);
-    return E_NOTIMPL;
+    struct composition_visual *visual = impl_from_IDCompositionVisualUnknown(iface);
+
+    TRACE("iface %p, offset_y %f.\n", iface, offset_y);
+
+    dcomp_lock();
+    visual->offset_y = offset_y;
+    dcomp_unlock();
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE visual_SetTransformObject(IDCompositionVisualUnknown *iface,
         IDCompositionTransform *transform)
 {
-    FIXME("iface %p, transform %p stub!\n", iface, transform);
-    return E_NOTIMPL;
+    struct composition_visual *visual = impl_from_IDCompositionVisualUnknown(iface);
+
+    TRACE("iface %p, transform %p.\n", iface, transform);
+
+    /* A null transform removes the transform of the visual. */
+    if (transform)
+    {
+        FIXME("Transform objects are not supported.\n");
+        return E_NOTIMPL;
+    }
+
+    dcomp_lock();
+    memset(&visual->transform, 0, sizeof(visual->transform));
+    visual->transform._11 = 1.0f;
+    visual->transform._22 = 1.0f;
+    dcomp_unlock();
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE visual_SetTransform(IDCompositionVisualUnknown *iface,
         const D2D_MATRIX_3X2_F *matrix)
 {
-    FIXME("iface %p, matrix %p stub!\n", iface, matrix);
-    return E_NOTIMPL;
+    struct composition_visual *visual = impl_from_IDCompositionVisualUnknown(iface);
+
+    TRACE("iface %p, matrix %p.\n", iface, matrix);
+
+    if (!matrix)
+        return E_INVALIDARG;
+
+    dcomp_lock();
+    visual->transform = *matrix;
+    dcomp_unlock();
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE visual_SetTransformParent(IDCompositionVisualUnknown *iface,
@@ -185,15 +217,38 @@ static HRESULT STDMETHODCALLTYPE visual_SetBorderMode(IDCompositionVisualUnknown
 static HRESULT STDMETHODCALLTYPE visual_SetClipObject(IDCompositionVisualUnknown *iface,
         IDCompositionClip *clip)
 {
-    FIXME("iface %p, clip %p stub!\n", iface, clip);
-    return E_NOTIMPL;
+    struct composition_visual *visual = impl_from_IDCompositionVisualUnknown(iface);
+
+    TRACE("iface %p, clip %p.\n", iface, clip);
+
+    /* A null clip removes the clip of the visual. */
+    if (clip)
+    {
+        FIXME("Clip objects are not supported.\n");
+        return E_NOTIMPL;
+    }
+
+    dcomp_lock();
+    visual->has_clip = FALSE;
+    dcomp_unlock();
+    return S_OK;
 }
 
 /* C++ method: SetClip(THIS_ const D2D_RECT_F &rect).  Use pointer instead of reference */
 static HRESULT STDMETHODCALLTYPE visual_SetClip(IDCompositionVisualUnknown *iface, const D2D_RECT_F *rect)
 {
-    FIXME("iface %p, rect %p stub!\n", iface, rect);
-    return E_NOTIMPL;
+    struct composition_visual *visual = impl_from_IDCompositionVisualUnknown(iface);
+
+    TRACE("iface %p, rect %p.\n", iface, rect);
+
+    if (!rect)
+        return E_INVALIDARG;
+
+    dcomp_lock();
+    visual->clip = *rect;
+    visual->has_clip = TRUE;
+    dcomp_unlock();
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE visual_SetContent(IDCompositionVisualUnknown *iface, IUnknown *content)
@@ -1178,6 +1233,8 @@ HRESULT create_visual(int version, REFIID iid, void **new_visual)
 
     visual->IDCompositionVisualUnknown_iface.lpVtbl = &visual_unknown_vtbl;
     visual->version = version;
+    visual->transform._11 = 1.0f;
+    visual->transform._22 = 1.0f;
     visual->ref = 1;
     list_init(&visual->child_visuals);
     hr = IUnknown_QueryInterface(&visual->IDCompositionVisualUnknown_iface, iid, new_visual);
