@@ -790,6 +790,12 @@ static void nulldrv_GetDC( HDC hdc, HWND hwnd, HWND top_win, const RECT *win_rec
 {
 }
 
+/* whether the driver draws into the windows of other processes by itself, as winex11 does in pGetDC */
+BOOL driver_paints_foreign_windows(void)
+{
+    return user_driver->pGetDC != nulldrv_GetDC;
+}
+
 static BOOL nulldrv_ProcessEvents( DWORD mask )
 {
     return FALSE;

@@ -142,6 +142,216 @@ static void create_offscreen_window_surface( HWND hwnd, const RECT *surface_rect
     if (previous) window_surface_release( previous );
 }
 
+/*******************************************************************
+ * Surface of a window that belongs to another process.
+ *
+ * A window surface is memory of the process that owns the window, so the process that draws into
+ * the window of another one has nothing to draw into. Keep what it draws in a surface of the same size
+ * and, when the surface is flushed, hand the changed pixels to the owner of the window: it draws them
+ * into its own surface.
+ */
+
+struct foreign_surface
+{
+    struct window_surface header;
+    struct list entry;  /* entry in foreign_surfaces */
+    HANDLE process;     /* owner of the window, opened to share memory with it */
+};
+
+struct foreign_image
+{
+    RECT rect;  /* the pixels are those of this rectangle of the surface, top-down, 32 bits, no padding */
+};
+
+static struct list foreign_surfaces = LIST_INIT( foreign_surfaces );
+static pthread_mutex_t foreign_surfaces_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static struct foreign_surface *get_foreign_surface( struct window_surface *surface )
+{
+    return CONTAINING_RECORD( surface, struct foreign_surface, header );
+}
+
+static void foreign_surface_set_clip( struct window_surface *surface, const RECT *rects, UINT count )
+{
+}
+
+static BOOL foreign_surface_flush( struct window_surface *surface, const RECT *rect, const RECT *dirty,
+                                   const BITMAPINFO *color_info, const void *color_bits, BOOL shape_changed,
+                                   const BITMAPINFO *shape_info, const void *shape_bits )
+{
+    struct foreign_surface *foreign = get_foreign_surface( surface );
+    UINT width = dirty->right - dirty->left, height = dirty->bottom - dirty->top, y;
+    UINT stride = get_dib_stride( color_info->bmiHeader.biWidth, color_info->bmiHeader.biBitCount );
+    HANDLE section = 0, shared = 0;
+    SIZE_T view_size = 0;
+    LARGE_INTEGER size;
+    struct foreign_image *image;
+    BYTE *dst;
+
+    if (!width || !height) return TRUE;
+
+    size.QuadPart = sizeof(*image) + (ULONGLONG)width * height * 4;
+    if (NtCreateSection( &section, SECTION_MAP_WRITE | SECTION_MAP_READ | SECTION_QUERY, NULL, &size,
+                         PAGE_READWRITE, SEC_COMMIT, 0 ))
+        return FALSE;
+
+    image = NULL;
+    if (NtMapViewOfSection( section, NtCurrentProcess(), (void **)&image, 0, 0, NULL, &view_size, ViewUnmap, 0,
+                            PAGE_READWRITE ))
+    {
+        NtClose( section );
+        return FALSE;
+    }
+
+    image->rect = *dirty;
+    dst = (BYTE *)(image + 1);
+    for (y = dirty->top; y < dirty->bottom; y++)
+    {
+        memcpy( dst, (const BYTE *)color_bits + y * stride + dirty->left * 4, width * 4 );
+        dst += width * 4;
+    }
+    NtUnmapViewOfSection( NtCurrentProcess(), image );
+
+    if (!NtDuplicateObject( NtCurrentProcess(), section, foreign->process, &shared, 0, 0, DUPLICATE_SAME_ACCESS ))
+    {
+        if (!NtUserPostMessage( surface->hwnd, WM_WINE_PUTIMAGE, HandleToULong( shared ), 0 ))
+            NtDuplicateObject( foreign->process, shared, 0, NULL, 0, 0, DUPLICATE_CLOSE_SOURCE );
+    }
+    NtClose( section );
+    return TRUE;
+}
+
+static void foreign_surface_destroy( struct window_surface *surface )
+{
+    struct foreign_surface *foreign = get_foreign_surface( surface );
+
+    if (foreign->process) NtClose( foreign->process );
+}
+
+static const struct window_surface_funcs foreign_surface_funcs =
+{
+    .size = sizeof(struct foreign_surface),
+    .set_clip = foreign_surface_set_clip,
+    .flush = foreign_surface_flush,
+    .destroy = foreign_surface_destroy
+};
+
+static void release_foreign_surface( struct foreign_surface *foreign )
+{
+    list_remove( &foreign->entry );
+    register_window_surface( &foreign->header, NULL );
+    window_surface_release( &foreign->header );
+}
+
+/* Get the surface that holds what this process draws into a window of another process.
+ * top_rect is the rectangle of the window, which the surface has the size of. */
+static struct window_surface *get_foreign_window_surface( HWND hwnd, const RECT *top_rect )
+{
+    char buffer[FIELD_OFFSET( BITMAPINFO, bmiColors[256] )];
+    BITMAPINFO *info = (BITMAPINFO *)buffer;
+    struct foreign_surface *foreign, *next;
+    struct window_surface *surface = NULL;
+    OBJECT_ATTRIBUTES attr = { sizeof(attr) };
+    CLIENT_ID client_id = { 0 };
+    HANDLE process;
+    RECT rect = { 0, 0, top_rect->right - top_rect->left, top_rect->bottom - top_rect->top };
+    DWORD pid;
+
+    if (IsRectEmpty( &rect )) return NULL;
+
+    pthread_mutex_lock( &foreign_surfaces_lock );
+    LIST_FOR_EACH_ENTRY_SAFE( foreign, next, &foreign_surfaces, struct foreign_surface, entry )
+    {
+        if (foreign->header.hwnd == hwnd && EqualRect( &foreign->header.rect, &rect ))
+        {
+            window_surface_add_ref( (surface = &foreign->header) );
+            goto done;
+        }
+        /* the window is gone, or it has another size */
+        if (foreign->header.hwnd == hwnd || !NtUserIsWindow( foreign->header.hwnd ))
+            release_foreign_surface( foreign );
+    }
+
+    if (!get_window_thread( hwnd, &pid )) goto done;
+    client_id.UniqueProcess = ULongToHandle( pid );
+    if (NtOpenProcess( &process, PROCESS_DUP_HANDLE, &attr, &client_id )) goto done;
+
+    memset( info, 0, sizeof(*info) );
+    info->bmiHeader.biSize        = sizeof(info->bmiHeader);
+    info->bmiHeader.biWidth       = rect.right;
+    info->bmiHeader.biHeight      = -rect.bottom; /* top-down */
+    info->bmiHeader.biPlanes      = 1;
+    info->bmiHeader.biBitCount    = 32;
+    info->bmiHeader.biSizeImage   = get_dib_image_size( info );
+    info->bmiHeader.biCompression = BI_RGB;
+
+    if (!(surface = window_surface_create( &foreign_surface_funcs, hwnd, &rect, info, 0 )))
+    {
+        NtClose( process );
+        goto done;
+    }
+    foreign = get_foreign_surface( surface );
+    foreign->process = process;
+    list_add_tail( &foreign_surfaces, &foreign->entry );
+    window_surface_add_ref( surface ); /* the one of foreign_surfaces */
+    register_window_surface( NULL, surface );
+
+done:
+    pthread_mutex_unlock( &foreign_surfaces_lock );
+    return surface;
+}
+
+/* Draw what another process sent with WM_WINE_PUTIMAGE into the window, which this process owns. */
+void put_window_image( HWND hwnd, HANDLE section )
+{
+    char buffer[FIELD_OFFSET( BITMAPINFO, bmiColors[256] )];
+    BITMAPINFO *info = (BITMAPINFO *)buffer;
+    struct foreign_image *image = NULL;
+    SIZE_T view_size = 0;
+    UINT width, height;
+    POINT origin;
+    WND *win;
+    HDC hdc;
+
+    /* The pixels are relative to the visible rectangle of the window, as is the surface of the window. */
+    if (!(win = get_win_ptr( hwnd )) || win == WND_DESKTOP || win == WND_OTHER_PROCESS)
+    {
+        NtClose( section );
+        return;
+    }
+    origin.x = win->rects.visible.left - win->rects.window.left;
+    origin.y = win->rects.visible.top - win->rects.window.top;
+    release_win_ptr( win );
+
+    if (NtMapViewOfSection( section, NtCurrentProcess(), (void **)&image, 0, 0, NULL, &view_size, ViewUnmap, 0,
+                            PAGE_READONLY ))
+    {
+        NtClose( section );
+        return;
+    }
+
+    width = image->rect.right - image->rect.left;
+    height = image->rect.bottom - image->rect.top;
+    if (width && height && view_size >= sizeof(*image) + (ULONGLONG)width * height * 4 &&
+        (hdc = NtUserGetDCEx( hwnd, 0, DCX_CACHE | DCX_WINDOW )))
+    {
+        memset( info, 0, sizeof(*info) );
+        info->bmiHeader.biSize        = sizeof(info->bmiHeader);
+        info->bmiHeader.biWidth       = width;
+        info->bmiHeader.biHeight      = -height; /* top-down */
+        info->bmiHeader.biPlanes      = 1;
+        info->bmiHeader.biBitCount    = 32;
+        info->bmiHeader.biSizeImage   = width * height * 4;
+        info->bmiHeader.biCompression = BI_RGB;
+        NtGdiSetDIBitsToDeviceInternal( hdc, image->rect.left + origin.x, image->rect.top + origin.y, width, height, 0, 0, 0, height,
+                                        image + 1, info, DIB_RGB_COLORS, 0, 0, FALSE, NULL );
+        NtUserReleaseDC( hwnd, hdc );
+    }
+
+    NtUnmapViewOfSection( NtCurrentProcess(), image );
+    NtClose( section );
+}
+
 struct scaled_surface
 {
     struct window_surface header;
@@ -871,7 +1081,11 @@ static void update_visible_region( struct dce *dce )
     if (!(paint_flags & SET_WINPOS_PIXEL_FORMAT && user_driver->dc_funcs.pPutImage) || (flags & DCX_WINDOW))
     {
         win = get_win_ptr( top_win );
-        if (win && win != WND_DESKTOP && win != WND_OTHER_PROCESS)
+        if (win == WND_OTHER_PROCESS)
+        {
+            if (!driver_paints_foreign_windows()) surface = get_foreign_window_surface( top_win, &top_rect );
+        }
+        else if (win && win != WND_DESKTOP)
         {
             surface = win->surface;
             if (surface) window_surface_add_ref( surface );

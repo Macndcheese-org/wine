@@ -43,6 +43,9 @@ extern ULONG_PTR get_icon_param( HICON handle );
 extern ULONG_PTR set_icon_param( HICON handle, const struct free_icon_params *params );
 extern HICON create_small_icon( HICON handle );
 
+/* driver.c */
+extern BOOL driver_paints_foreign_windows(void);
+
 /* dce.c */
 extern struct window_surface dummy_surface;
 extern void create_window_surface( HWND hwnd, BOOL create_layered, const RECT *surface_rect, struct ratio monitor_dpi,
@@ -55,6 +58,7 @@ extern void move_window_bits_surface( HWND hwnd, const RECT *window_rect, struct
                                       const RECT *old_visible_rect, const RECT *valid_rects );
 extern void register_window_surface( struct window_surface *old,
                                      struct window_surface *new );
+extern void put_window_image( HWND hwnd, HANDLE section );
 
 extern void window_surface_lock( struct window_surface *surface );
 extern void window_surface_unlock( struct window_surface *surface );
