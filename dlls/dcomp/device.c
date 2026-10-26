@@ -456,6 +456,26 @@ static RECT matrix_transform_rect(const D2D_MATRIX_3X2_F *matrix, float left, fl
     return ret;
 }
 
+/* The windows above the target window, or above one of its ancestors, that are on screen must stay in front of what
+ * is composited: remove them from the clip region of the device context of the target. */
+static void exclude_windows_above(HWND target, HDC hdc)
+{
+    HWND window = target, sibling;
+    RECT rect;
+
+    while (window && (GetWindowLongW(window, GWL_STYLE) & WS_CHILD))
+    {
+        for (sibling = GetWindow(window, GW_HWNDPREV); sibling; sibling = GetWindow(sibling, GW_HWNDPREV))
+        {
+            if (!IsWindowVisible(sibling) || (GetWindowLongW(sibling, GWL_EXSTYLE) & WS_EX_TRANSPARENT)) continue;
+            if (!GetWindowRect(sibling, &rect)) continue;
+            MapWindowPoints(NULL, target, (POINT *)&rect, 2);
+            ExcludeClipRect(hdc, rect.left, rect.top, rect.right, rect.bottom);
+        }
+        window = GetParent(window);
+    }
+}
+
 static void do_composite_dxgi_surface(const struct composition_target *target,
                                       const struct composition_visual *visual,
                                       const struct composite_state *composite_state,
@@ -606,6 +626,7 @@ static void do_composite_dxgi_surface(const struct composition_target *target,
     if (!target->topmost)
         style |= DCX_CLIPCHILDREN;
     dst_dc = GetDCEx(target->hwnd, 0, style);
+    exclude_windows_above(target->hwnd, dst_dc);
     dst_rect = matrix_transform_rect(&composite_state->matrix, 0.0f, 0.0f, size.width, size.height);
     TRACE("visual %p, source size %ux%u, destination %s, clip %s, target %p.\n", visual, size.width, size.height,
             wine_dbgstr_rect(&dst_rect), composite_state->has_clip ? wine_dbgstr_rect(&composite_state->clip) : "none", target->hwnd);
