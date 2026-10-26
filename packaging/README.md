@@ -17,6 +17,7 @@ Win32-to-SwiftUI layer is on unless `WINE_MNC_NATIVE_UI=0`.
 | `verify-app.py` | Fails when the bundle still depends on the machine that built it (Homebrew, `/usr/local`, `DYLD_*`, bare-name `dlopen`, bad signature). |
 | `import-gptk.sh` | Builds the Direct3D set from a GPTK image and the `mnc-d3d` package. |
 | `build-app.sh` | Puts everything together, checks it, and writes the `.tar.xz`. |
+| `prerelease.sh` | Names and publishes the GitHub pre-release of a CI build (see below). |
 
 ## Why there are no DYLD variables
 
@@ -30,6 +31,15 @@ bare name is left.
 
 D3DMetal is found the same way: when the backend app does not export
 `CX_APPLEGPTK_LIBD3DSHARED_PATH`, ntdll uses `<prefix>/lib/external/libd3dshared.dylib`.
+
+## Pre-releases from CI
+
+Every push to `mnc-11.20` (`RELEASE_BRANCH` in `.github/workflows/build-release.yml`) publishes the
+build as the pre-release **MacNdCheese Wine 11.20.0**, tag `11.20.0`, with
+`MNC-Wine-11.20.0-osx64.tar.xz` attached. The next build replaces it. To keep one, edit the release on
+GitHub and untick "pre-release": the builds that follow are then published as `11.20.1`, and after that
+one is made stable, `11.20.2`, and so on. A new Wine version restarts at `.0` (the number comes from `VERSION`).
+Other `mnc-*` branches only keep the build as a run artifact.
 
 ## Making a release by hand (on a Mac)
 
