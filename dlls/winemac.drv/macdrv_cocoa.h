@@ -564,6 +564,8 @@ extern void macdrv_w2s_set_host_geometry(WineW2SHostView *view, WineWindow *wind
 extern void macdrv_w2s_post_wake(WineW2SHostView *view, uint64_t cookie);
 extern void macdrv_window_create_ca_layer_host_view(WineWindow *window, unsigned int context_id);
 extern void macdrv_window_release_ca_layer_host_view(WineWindow *window, unsigned int context_id);
+extern void macdrv_view_create_ca_layer_host(macdrv_view view, unsigned int context_id);
+extern void macdrv_view_release_ca_layer_host(macdrv_view view, unsigned int context_id);
 extern void macdrv_create_remote_layer(void* hwnd, unsigned int context_id);
 extern void macdrv_release_remote_layer(void* hwnd, unsigned int context_id);
 extern bool macdrv_get_view_backing_size(WineContentView *view, int backing_size[2]);

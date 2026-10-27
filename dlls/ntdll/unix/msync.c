@@ -419,7 +419,7 @@ int do_msync(void)
     static int do_msync_cached = -1;
 
     if (do_msync_cached == -1)
-        do_msync_cached = getenv("WINEMSYNC") && atoi(getenv("WINEMSYNC"));
+        do_msync_cached = getenv("WINEMSYNC") ? atoi(getenv("WINEMSYNC")) : 1;  /* on unless WINEMSYNC=0 (MNC) */
 
     return do_msync_cached;
 }

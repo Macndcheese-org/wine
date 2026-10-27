@@ -195,5 +195,6 @@ extern void mnc_fit_window_created( HWND hwnd );
 extern void w2s_window_created( HWND hwnd );
 extern BOOL w2s_message_box( const MSGBOXPARAMSW *params, INT *ret );
 extern BOOL w2s_track_popup_menu( HMENU menu, UINT flags, INT x, INT y, HWND hwnd, TPMPARAMS *params, INT *ret );
+extern BOOL w2s_draw_icon( HDC hdc, INT x, INT y, HICON icon, INT cx, INT cy, UINT step, HBRUSH brush, UINT flags );
 
 #endif /* __WINE_USER_PRIVATE_H */

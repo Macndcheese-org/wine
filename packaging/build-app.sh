@@ -7,17 +7,19 @@
 #   --version      version of the application, for example 11.20.0
 #   --out          folder that receives MNC Wine.app
 #   --d3d-dir      output of import-gptk.sh (DXMT, D3DMetal and the rest of the Direct3D set)
-#   --w2s-dir      folder with win32swiftui.dll and win32swiftui.so, from the Win32-to-SwiftUI build
+#   --addons-dir   folder with mono/wine-mono-<version>-x86.msi and gecko/wine-gecko-<version>-<arch>.msi
+#   --w2s-dir      folder with win32swiftui.dll and win32swiftui.so (and i386/win32swiftui.dll), from the Win32-to-SwiftUI build
+#   --rosetta-dir  folder with runtime_loader and libRuntimeRosettax87 from rosettax87_jit (the x87 JIT, on by default for 32-bit programs)
 #   --config-h     include/config.h of the build, to bundle the libraries Wine opens with dlopen
 #   --search       where to find the libraries to bundle (repeatable; default: the Homebrew prefix lib)
-#   --icon         .icns file for the application (optional)
+#   --icon         .icns file for the application (default: launcher/winehq.icns, the Wine logo of the WineHQ application)
 #   --archive      also write MNC-Wine-<version>-osx64.tar.xz next to the application
 #
 # The bundle is checked at the end with verify-app.py; the script fails if the check does.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
-install= version= out= d3d= w2s= config_h= icon= archive=0
+install= version= out= d3d= w2s= addons= rosetta= config_h= icon= archive=0
 search=()
 while [ $# -gt 0 ]; do
   case $1 in
@@ -26,6 +28,8 @@ while [ $# -gt 0 ]; do
     --out)         out=$2; shift 2 ;;
     --d3d-dir)     d3d=$2; shift 2 ;;
     --w2s-dir)     w2s=$2; shift 2 ;;
+    --addons-dir)  addons=$2; shift 2 ;;
+    --rosetta-dir) rosetta=$2; shift 2 ;;
     --config-h)    config_h=$2; shift 2 ;;
     --search)      search+=("$2"); shift 2 ;;
     --icon)        icon=$2; shift 2 ;;
@@ -33,7 +37,7 @@ while [ $# -gt 0 ]; do
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
 done
-[ -n "$install" ] && [ -n "$version" ] && [ -n "$out" ] || { sed -n '2,16p' "$0"; exit 2; }
+[ -n "$install" ] && [ -n "$version" ] && [ -n "$out" ] || { sed -n '2,17p' "$0"; exit 2; }
 [ -x "$install/bin/wine" ] || { echo "$install/bin/wine is missing" >&2; exit 1; }
 if [ ${#search[@]} -eq 0 ]; then
   if command -v brew >/dev/null; then search=("$(brew --prefix)/lib"); else search=(/usr/local/lib); fi
@@ -44,27 +48,56 @@ res=$app/Contents/Resources
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$res"
 cp -Rp "$install" "$res/wine"
+# Development files are not part of the application: the compiler driver and the IDL/resource
+# tools carry /usr/local default search paths, and nobody builds programs with this app.
+(cd "$res/wine" && rm -rf include bin/winegcc bin/wineg++ bin/winecpp bin/widl bin/wrc bin/wmc \
+   bin/winebuild bin/winemaker bin/function_grep.pl && find lib -name '*.a' -delete)
 
 arch_dir=$res/wine/lib/wine
 if [ -n "$d3d" ]; then
   cp -p "$d3d"/windows/*.dll "$arch_dir/x86_64-windows/"
+  # Wine finds the builtin of a file marked "Wine builtin DLL" by the name written inside the file,
+  # not by the name of the file: d3d11_dxmt.dll and d3d11_d3dm.dll both say "d3d11.dll". A d3d11.dll,
+  # dxgi.dll or d3d10core.dll left in this folder would be loaded in place of the file that was asked
+  # for (GPTK instead of DXMT, Wine's own d3d10core instead of DXMT's). 64-bit programs never ask for
+  # those names: ntdll sends them to the <name>_dxmt, <name>_d3dm, ... files, so they are not shipped.
+  for m in d3d11 dxgi d3d10core; do rm -f "$arch_dir/x86_64-windows/$m.dll"; done
+  # the unix side of DXMT (winemetal.so, winemetal9.so)
+  [ -d "$d3d/unix" ] && cp -p "$d3d"/unix/*.so "$arch_dir/x86_64-unix/"
+  # the 32-bit side of winemetal (a 32-bit DXMT d3d9 reaches the unix library through it)
+  [ -d "$d3d/windows32" ] && cp -p "$d3d"/windows32/*.dll "$arch_dir/i386-windows/"
   mkdir -p "$res/wine/lib/external"
   cp -Rp "$d3d"/external/. "$res/wine/lib/external/"
+fi
+if [ -n "$rosetta" ]; then
+  # found by ntdll at <prefix>/lib/mnc-rosetta/runtime_loader when MNC_X87_LOADER_PATH is not set
+  mkdir -p "$res/wine/lib/mnc-rosetta"
+  cp -p "$rosetta/runtime_loader" "$rosetta/libRuntimeRosettax87" "$res/wine/lib/mnc-rosetta/"
+  for f in LICENSE VERSION; do [ -f "$rosetta/$f" ] && cp -p "$rosetta/$f" "$res/wine/lib/mnc-rosetta/"; done
 fi
 if [ -n "$w2s" ]; then
   cp -p "$w2s/win32swiftui.dll" "$arch_dir/x86_64-windows/"
   cp -p "$w2s/win32swiftui.so"  "$arch_dir/x86_64-unix/"
+  # 32-bit programs (installers, old games) get the layer too when the folder has it
+  [ -f "$w2s/i386/win32swiftui.dll" ] && cp -p "$w2s/i386/win32swiftui.dll" "$arch_dir/i386-windows/"
+fi
+
+# Wine Mono and Wine Gecko, as the installers wine looks for in share/wine/mono and share/wine/gecko:
+# a new prefix then sets them up from the application instead of asking to download them
+if [ -n "$addons" ]; then
+  for d in mono gecko; do
+    [ -d "$addons/$d" ] && mkdir -p "$res/wine/share/wine/$d" && cp -p "$addons/$d"/*.msi "$res/wine/share/wine/$d/"
+  done
 fi
 
 # launcher and Info.plist
 clang -arch x86_64 -arch arm64 -mmacosx-version-min=11.0 -fobjc-arc -O2 \
   -framework Cocoa "$here/launcher/main.m" -o "$app/Contents/MacOS/MNC Wine"
-icon_entry=
-if [ -n "$icon" ]; then
-  cp "$icon" "$res/MNCWine.icns"
-  icon_entry='<key>CFBundleIconFile</key><string>MNCWine</string>'
-fi
-sed -e "s|@VERSION@|$version|g" -e "s|@ICON_ENTRY@|$icon_entry|" "$here/launcher/Info.plist.in" > "$app/Contents/Info.plist"
+# the welcome text shown in Terminal (winehelp, appdb), as in the WineHQ application
+cp -Rp "$here/launcher/start" "$res/start"
+# the icon: the Wine logo shipped by the WineHQ application unless --icon says otherwise
+cp "${icon:-$here/launcher/winehq.icns}" "$res/MNCWine.icns"
+sed -e "s|@VERSION@|$version|g" "$here/launcher/Info.plist.in" > "$app/Contents/Info.plist"
 plutil -lint "$app/Contents/Info.plist"
 
 # third-party libraries, inside the bundle, found through run paths

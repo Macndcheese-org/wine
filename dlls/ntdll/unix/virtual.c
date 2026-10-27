@@ -3816,14 +3816,17 @@ static BOOL force_laa(void)
     char tmp[64];
     KEY_VALUE_PARTIAL_INFORMATION *info = (KEY_VALUE_PARTIAL_INFORMATION *)tmp;
     DWORD count;
-    BOOL result=FALSE;
+    /* MNC: a 32-bit image gets the large address space unless it is switched off, either with
+     * WINE_LARGE_ADDRESS_AWARE=0 or with a LargeAddressAware=0 value in
+     * HKCU\Software\Wine\AppDefaults\app.exe, so the exe on disk is never patched. */
+    BOOL result=TRUE;
     const WCHAR *app_name = main_image_name;
 
-    if ((e != NULL) && (*e != '\0' && *e != '0'))
-        return TRUE;
+    if ((e != NULL) && (*e != '\0'))
+        return *e != '0';
     /* the first TEB (and with it this check) now comes before main_wargv exists,
      * so the name is the one load_main_exe() recorded */
-    if (!app_name[0]) return FALSE;
+    if (!app_name[0]) return TRUE;
 
     if (!open_hkcu_key( "Software\\Wine\\AppDefaults", &root ))
     {
@@ -3846,10 +3849,7 @@ static BOOL force_laa(void)
         if (!NtQueryValueKey( app_key, &valuenameW, KeyValuePartialInformation, tmp, sizeof(tmp)-1, &count))
         {
             if (info->DataLength >= sizeof(DWORD))
-            {
-                if ((*(DWORD *)info->Data) != 0)
-                    result = TRUE;
-            }
+                result = (*(DWORD *)info->Data) != 0;
         }
         NtClose( app_key );
     }

@@ -109,7 +109,7 @@ static BOOL is_prefix_bootstrap;  /* are we bootstrapping the prefix? */
 /* Bradar MNC (preserve 32-bit on a prefix with an empty i386 slice): if a prefix's
  * syswow64 directory was never populated with the 32-bit builtins, the post-bootstrap
  * loader refuses to load 32-bit builtins "without a file" and evry 32-bit process dies
- * with kernel32 c0000135. This gate (env MNC_SKIP_WOW64_INSTALL=1) lets
+ * with kernel32 c0000135. This gate (env MNC_SKIP_32BIT_SETUP=1) lets
  * find_builtin_without_file resolve builtins straight from the wine lib/build dir even
  * post-bootstrap -- exactly what is_prefix_bootstrap already permits -- so 32-bit keeps
  * working on such a prefix.
@@ -135,7 +135,7 @@ static BOOL mnc_wow64_builtin_nofile(void)
          * installs, which is exactly the bug the native populate now fixes properly.) */
         UNICODE_STRING name, value;
         WCHAR valbuf[8] = {0};
-        RtlInitUnicodeString( &name, L"MNC_SKIP_WOW64_INSTALL" );
+        RtlInitUnicodeString( &name, L"MNC_SKIP_32BIT_SETUP" );
         value.Buffer = valbuf; value.Length = 0; value.MaximumLength = sizeof(valbuf);
         cached = (!RtlQueryEnvironmentVariable_U( NULL, &name, &value ) &&
                   value.Length >= sizeof(WCHAR) && valbuf[0] == '1');
@@ -4299,7 +4299,7 @@ done:
  * d3d10core_dxmt.dll / dxgi_dxmt.dll (+ winemetal.dll/.so), and any process
  * belonging to the Steam client itself gets its D3D loads redirected to
  * them.  Games and every other process keep D3DMetal.
- * Set MNC_STEAM_DXMT=0 in the environment to disable the redirect.
+ * Set MNC_STEAM_CLIENT_ON_DXMT=0 in the environment to disable the redirect.
  */
 static BOOL is_steam_client_process(void)
 {
@@ -4311,9 +4311,9 @@ static BOOL is_steam_client_process(void)
          * 2026-07-25: EA App (eadesktop.exe/ealauncher.exe/eacefsubprocess.exe) was
          * removed from it -- the "name-list matching doesn't scale to every CEF app"
          * concern this comment used to raise is now actually addressed: EA App launches
-         * as an ordinary "Application", which sets MNC_CEF_SAFE_MODE, and the two things
+         * as an ordinary "Application", which sets MNC_CEF_COMPAT_MODE, and the two things
          * this list bought it are both covered generically -- the winegstreamer block by
-         * is_cef_safe_mode() below, and the d3d->DXMT routing by MNC_GAME_BACKEND=dxmt
+         * is_cef_compat_mode() below, and the d3d->DXMT routing by MNC_GRAPHICS_ENGINE=dxmt
          * (the backend forces dxmt for the whole force_dxmt_cef launch class). Any new
          * CEF launcher therefore works with NO engine change. Steam still needs the list
          * because it is launched as a launcher, not through that Application path. */
@@ -4353,7 +4353,7 @@ static BOOL is_steam_client_process(void)
             UNICODE_STRING name, value;
             WCHAR valbuf[4];
 
-            RtlInitUnicodeString( &name, L"MNC_STEAM_DXMT" );
+            RtlInitUnicodeString( &name, L"MNC_STEAM_CLIENT_ON_DXMT" );
             value.Buffer = valbuf;
             value.Length = 0;
             value.MaximumLength = sizeof(valbuf);
@@ -4368,9 +4368,9 @@ static BOOL is_steam_client_process(void)
 
 /* MNC: generalizes the Steam/EA name-list above to any launch the backend already flagged
  * as CEF-risky (arbitrary "Applications" added via MacNdCheese, whose CEF/Electron helper
- * subprocesses have no fixed name to hardcode) -- set via MNC_CEF_SAFE_MODE, inherited by
+ * subprocesses have no fixed name to hardcode) -- set via MNC_CEF_COMPAT_MODE, inherited by
  * the whole process tree so it reaches those helpers regardless of what they're named. */
-static BOOL is_cef_safe_mode(void)
+static BOOL is_cef_compat_mode(void)
 {
     static int cached = -1;
 
@@ -4379,7 +4379,7 @@ static BOOL is_cef_safe_mode(void)
         UNICODE_STRING name, value;
         WCHAR valbuf[4];
 
-        RtlInitUnicodeString( &name, L"MNC_CEF_SAFE_MODE" );
+        RtlInitUnicodeString( &name, L"MNC_CEF_COMPAT_MODE" );
         value.Buffer = valbuf;
         value.Length = 0;
         value.MaximumLength = sizeof(valbuf);
@@ -4432,7 +4432,7 @@ static BOOL is_cef_host_process(void)
  * has to be made on the first d3d load, before the game has said which API it wants.  Two
  * structural tests, neither of which needs a name list: the executable imports (or
  * delay-imports) d3d12.dll, or it ships the Agility SDK runtime (D3D12Core.dll) beside itself.
- * A program that LoadLibrary()s d3d12.dll without either must be told with MNC_GAME_BACKEND. */
+ * A program that LoadLibrary()s d3d12.dll without either must be told with MNC_GRAPHICS_ENGINE. */
 static BOOL image_imports_d3d12( HMODULE module )
 {
     const IMAGE_IMPORT_DESCRIPTOR *imp;
@@ -4500,12 +4500,12 @@ static const WCHAR *steam_dxmt_redirect( const WCHAR *libname )
      * DXMT (system32 d3d11.dll = DXMT, kept CANONICAL "d3d11.dll" via the empty
      * dlls/d3d11 build slot so ANGLE's GetModuleHandle("d3d11.dll") works). GAMES
      * (every non-steam process) are routed to the D3DMetal "_d3dm" GPTK stubs in
-     * system32 -> D3DMETAL_FB -> libd3dshared. MNC_GAME_D3DMETAL=0 keeps games on DXMT. */
+     * system32 -> D3DMETAL_FB -> libd3dshared. */
     /* Bradar openxr column = the monofunc/dxmt feature-openxr d3d11 (DXMT + OpenXR passthrough
-     * via the wineopenxr bridge). VR games (MNC_GAME_BACKEND=vr) route their d3d11/dxgi/d3d10core
+     * via the wineopenxr bridge). VR games (MNC_GRAPHICS_ENGINE=vr) route their d3d11/dxgi/d3d10core
      * to the _openxr builds; everythin else is untouched */
     /* Bradar opengl column = the Wine-Devel 11.8 wined3d builtin (D3D11->wined3d->OpenGL->
-     * macOS GL, for opengl 3.2 games). MNC_GAME_BACKEND=opengl routes d3d11/dxgi/d3d10core
+     * macOS GL, for opengl 3.2 games). MNC_GRAPHICS_ENGINE=opengl routes d3d11/dxgi/d3d10core
      * to the _opengl builds AND their wined3d import to wined3d_opengl.dll so the 11.8 d3d11
      * pairs with its matching 11.8 wined3d (mixing it with our 11.0 builtin wined3d = ABI break).
      * opengl32 stays OUR 11.0 build (GL API is stable + its .so pairs with our ntdll). */
@@ -4537,31 +4537,31 @@ static const WCHAR *steam_dxmt_redirect( const WCHAR *libname )
      * backend) becomes loadable, so block it for Steam processes -> CoCreateInstance
      * fails -> Steam falls back to its bundled cef\winh264.dll. GAMES keep winegstreamer
      * (system32) for MF video (RE-Engine intro etc). Same per-process split as d3d.
-     * is_cef_safe_mode() extends this to any CEF-safe-mode Application's own CEF
+     * is_cef_compat_mode() extends this to any CEF-compat-mode Application's own CEF
      * helper subprocesses (see comment on that function) without needing their name added
      * to steam_exes[] above -- gated on --type= so it never touches the Application's own
      * top-level process or an unrelated child it spawns. */
-    /* 2026-07-25: use is_cef_safe_mode() (not a --type=-only test) so this covers the
+    /* 2026-07-25: use is_cef_compat_mode() (not a --type=-only test) so this covers the
      * Application's OWN top-level process too, not just its --type= helpers. That top-level
      * cover used to come from naming EADesktop.exe/EALauncher.exe in steam_exes[]; those names
      * are gone now, so the generic flag has to carry it. Only ever true for Applications
      * (force_dxmt_cef), never for games -- games keep winegstreamer for MF video as before. */
-    if ((is_steam_client_process() || is_cef_safe_mode()) &&
+    if ((is_steam_client_process() || is_cef_compat_mode()) &&
         (!wcsicmp( base, L"winegstreamer.dll" ) || !wcsicmp( base, L"winegstreamer" )))
     {
-        TRACE( "mnc: blocking winegstreamer for steam/cef-safe-mode %s\n", debugstr_w(libname) );
+        TRACE( "mnc: blocking winegstreamer for steam/cef-compat-mode %s\n", debugstr_w(libname) );
         return L"winegstreamer_blocked_for_steam.dll";  /* non-existent -> DLL_NOT_FOUND */
     }
 
-    /* 2026-07-28: ...and any CEF host process of a CEF-safe-mode launch, for the same reason
+    /* 2026-07-28: ...and any CEF host process of a CEF-compat-mode launch, for the same reason
      * Steam is here -- CEF cannot render on D3DMetal. This used to be done by the BACKEND
-     * forcing MNC_GAME_BACKEND=dxmt for the whole launch, which also bound the GAME: picking
+     * forcing MNC_GRAPHICS_ENGINE=dxmt for the whole launch, which also bound the GAME: picking
      * D3DMetal on Battlefield 4's card silently ran it on DXMT, and DXMT's dxgi is the only
      * one of our five builds missing the private DXGID3D10CreateDevice export that wine's own
      * d3d10 calls -> "unimplemented function, aborting" before the menu. Scoping the redirect
      * to the CEF processes lets the game honour the backend the user actually chose, while EA
      * App's own processes still get DXMT. Structural, no exe names. */
-    if (is_steam_client_process() || (is_cef_safe_mode() && is_cef_host_process()))
+    if (is_steam_client_process() || (is_cef_compat_mode() && is_cef_host_process()))
     {
         /* Bradar Steam -> DXMT. The canonical d3d11.dll/dxgi.dll builtins are the D3DMetal
          * stubs (CEF cannot render on D3DMetal) so rewrite Steam d3d loads to the
@@ -4579,16 +4579,16 @@ static const WCHAR *steam_dxmt_redirect( const WCHAR *libname )
      * orphan in system32) -> DLL_NOT_FOUND/init-fail -> CEF falls back to bundled winh264 ->
      * Steam stays stable on DXMT. A WORKING "winegstreamer.dll" in system32 crashed Steam, so
      * the working build lives under "winegstreamer_game.dll" which Steam never requests; games
-     * (non-steam) get rewritten to it here. Independent of MNC_GAME_D3DMETAL (video != d3d). */
+     * (non-steam) get rewritten to it here. Independent of MNC_GRAPHICS_ENGINE (video != d3d). */
     if (!wcsicmp( base, L"winegstreamer.dll" ) || !wcsicmp( base, L"winegstreamer" ))
     {
         TRACE( "mnc: routing game winegstreamer -> winegstreamer_game.dll %s\n", debugstr_w(libname) );
         return L"winegstreamer_game.dll";
     }
 
-    {   /* Bradar game backend: MNC_GAME_BACKEND = d3dmetal (default) | dxmt | dxvk */
+    {   /* Bradar graphics engine: MNC_GRAPHICS_ENGINE = d3dmetal | dxmt | dxvk | vr | opengl; unset: see game_auto */
         UNICODE_STRING name, value; WCHAR valbuf[16] = {0};
-        RtlInitUnicodeString( &name, L"MNC_GAME_BACKEND" );
+        RtlInitUnicodeString( &name, L"MNC_GRAPHICS_ENGINE" );
         value.Buffer = valbuf; value.Length = 0; value.MaximumLength = sizeof(valbuf);
         if (!RtlQueryEnvironmentVariable_U( NULL, &name, &value ))
         {
@@ -4601,22 +4601,22 @@ static const WCHAR *steam_dxmt_redirect( const WCHAR *libname )
             /* Bradar opengl 3.2 games route to the Wine-Devel 11.8 wined3d->OpenGL build */
             if (!wcsicmp( valbuf, L"opengl" )) game_opengl = 1;
         }
-        else
-        {   /* Bradar back-compat: MNC_GAME_D3DMETAL=0 still means dxmt */
-            UNICODE_STRING n2, v2; WCHAR vb2[4];
-            RtlInitUnicodeString( &n2, L"MNC_GAME_D3DMETAL" );
-            v2.Buffer = vb2; v2.Length = 0; v2.MaximumLength = sizeof(vb2);
-            if (!RtlQueryEnvironmentVariable_U( NULL, &n2, &v2 ))
-            {
-                if (v2.Length >= sizeof(WCHAR) && vb2[0] == '0') game_dxmt = 1;
-            }
-            else game_auto = 1;
-        }
-        /* an unknown MNC_GAME_BACKEND value (or "d3dmetal") keeps its old meaning: D3DMetal */
+        else game_auto = 1;
+        /* an unknown MNC_GRAPHICS_ENGINE value (or "d3dmetal") keeps its old meaning: D3DMetal */
     }
     /* Bradar only remap bare names so the 12on7 agility probe path fails like on windows */
     if (base == libname)
     {
+#ifdef _WIN64
+        /* DX9 has no D3DMetal column: when nothing chose a backend a 64-bit program that is not DX12 gets
+         * DXMT's d3d9 (shipped as d3d9_dxmt.dll).  A launch that names its backend is left alone: the
+         * backend app stages its own d3d9 for it. */
+        if (game_auto && (!wcsicmp( base, L"d3d9" ) || !wcsicmp( base, L"d3d9.dll" )) && !is_dx12_process())
+        {
+            TRACE( "mnc: routing %s -> d3d9_dxmt.dll\n", debugstr_w(libname) );
+            return L"d3d9_dxmt.dll";
+        }
+#endif
         for (i = 0; i < ARRAY_SIZE(map); i++)
         {
             if (!wcsicmp( base, map[i].from ))
@@ -5385,13 +5385,13 @@ static void mnc_dump_exit_backtrace( DWORD status )
      * clean-exit was being investigated. That is root-caused n fixed (the Rosetta-2 WoW64
      * thunk, see dlls/wow64cpu/cpu.c), so the app names are gone -- leaving them in would
      * keep littering C:\mnc-exit-bt-*.txt on every EA process exit for no reason. Keep the
-     * tool, just make it opt-in: set MNC_DUMP_EXIT_BT=1 to dump for EVERY process exit.
+     * tool, just make it opt-in: set MNC_DEBUG_EXIT_BACKTRACE=1 to dump for EVERY process exit.
      * Off by default, so no name list to maintain and nothing fires unless asked for. */
     {
         UNICODE_STRING var, val;
         WCHAR vbuf[4];
 
-        RtlInitUnicodeString( &var, L"MNC_DUMP_EXIT_BT" );
+        RtlInitUnicodeString( &var, L"MNC_DEBUG_EXIT_BACKTRACE" );
         val.Buffer = vbuf;
         val.Length = 0;
         val.MaximumLength = sizeof(vbuf);

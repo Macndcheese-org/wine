@@ -6,7 +6,7 @@
  * SwiftUI views, and MessageBox is offered to it before wine's own dialog.
  * With the switch off, or without the DLL, nothing here does anything.
  *
- * The switch is on by default. Turn it off with WINE_MNC_NATIVE_UI=0 in the
+ * The switch is on by default. Turn it off with MNC_NATIVE_UI=0 in the
  * environment, or HKCU\Software\Wine\Mac Driver\NativeUI = "n", overridable per
  * program under HKCU\Software\Wine\AppDefaults\<program.exe>\Mac Driver.
  * Wine's own background processes stay off unless a setting names them.
@@ -27,6 +27,8 @@ static INIT_ONCE w2s_once = INIT_ONCE_STATIC_INIT;
 static void (WINAPI *pW2SWindowCreated)( HWND hwnd );
 static BOOL (WINAPI *pW2SMessageBox)( const MSGBOXPARAMSW *params, INT *ret );
 static BOOL (WINAPI *pW2STrackPopupMenu)( HMENU menu, UINT flags, INT x, INT y, HWND hwnd, TPMPARAMS *params, INT *ret );
+static BOOL (WINAPI *pW2SOpenFolder)( const WCHAR *path );
+static BOOL (WINAPI *pW2SDrawIcon)( HDC hdc, INT x, INT y, HICON icon, INT cx, INT cy, UINT step, HBRUSH brush, UINT flags );
 
 static int bool_value( const WCHAR *value )
 {
@@ -64,7 +66,7 @@ static BOOL w2s_enabled(void)
     WCHAR value[8], module[MAX_PATH], path[MAX_PATH + 64], *exe = NULL;
     int on;
 
-    if (GetEnvironmentVariableW( L"WINE_MNC_NATIVE_UI", value, ARRAY_SIZE(value) ) &&
+    if (GetEnvironmentVariableW( L"MNC_NATIVE_UI", value, ARRAY_SIZE(value) ) &&
         (on = bool_value( value )) != -1)
         return on;
 
@@ -94,6 +96,8 @@ static BOOL CALLBACK w2s_init( INIT_ONCE *once, void *param, void **context )
     pW2SWindowCreated = (void *)GetProcAddress( module, "W2SWindowCreated" );
     pW2SMessageBox = (void *)GetProcAddress( module, "W2SMessageBox" );
     pW2STrackPopupMenu = (void *)GetProcAddress( module, "W2STrackPopupMenu" );
+    pW2SDrawIcon = (void *)GetProcAddress( module, "W2SDrawIcon" );
+    pW2SOpenFolder = (void *)GetProcAddress( module, "W2SOpenFolder" );
     TRACE( "win32swiftui.dll loaded: %p %p\n", pW2SWindowCreated, pW2SMessageBox );
     return TRUE;
 }
@@ -114,4 +118,18 @@ BOOL w2s_track_popup_menu( HMENU menu, UINT flags, INT x, INT y, HWND hwnd, TPMP
 {
     InitOnceExecuteOnce( &w2s_once, w2s_init, NULL, NULL );
     return pW2STrackPopupMenu && pW2STrackPopupMenu( menu, flags, x, y, hwnd, params, ret );
+}
+
+/* DrawIconEx of one of wine's shell32 icons draws the macOS image of the same meaning (icons.c of the runtime) */
+BOOL w2s_draw_icon( HDC hdc, INT x, INT y, HICON icon, INT cx, INT cy, UINT step, HBRUSH brush, UINT flags )
+{
+    InitOnceExecuteOnce( &w2s_once, w2s_init, NULL, NULL );
+    return pW2SDrawIcon && pW2SDrawIcon( hdc, x, y, icon, cx, cy, step, brush, flags );
+}
+
+/* explorer.exe started on a folder: the Finder shows it when the native UI is on (explorer.exe's own window otherwise) */
+BOOL WINAPI W2SOpenFolder( const WCHAR *path )
+{
+    InitOnceExecuteOnce( &w2s_once, w2s_init, NULL, NULL );
+    return pW2SOpenFolder && pW2SOpenFolder( path );
 }

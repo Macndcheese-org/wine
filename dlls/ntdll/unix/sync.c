@@ -3772,7 +3772,7 @@ NTSTATUS WINAPI NtWaitForAlertByThreadId( const void *address, const LARGE_INTEG
          * faked STATUS_ALERTED and crashed steam.exe. Covers finite and
          * infinite waits. Reliable wakes still return immediately with no added
          * latency. Auto-ON during prefix bootstrap only: the launcher exports
-         * MNC_FAST_RPC_BOOT=1 for `wineboot -u` (paired with the rpcrt4
+         * MNC_FAST_WINEBOOT=1 for `wineboot -u` (paired with the rpcrt4
          * fast-RPC gate), which the bootstrap alert-wake-drop needs to avoid
          * ~180s of stalls. OFF otherwise so Steam/runtime is byte-for-byte
          * vanilla. Explicit WINE_ALERT_POLL_MS=N overrides in any context

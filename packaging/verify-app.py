@@ -10,13 +10,18 @@ Fails (exit status 1) when anything in it still depends on the machine it was bu
   * a library is opened by bare name (dlopen("libfoo.dylib")), which dyld resolves through
     DYLD_FALLBACK_LIBRARY_PATH, that is /usr/local/lib, that is Homebrew;
   * DYLD_* variables are set by the launcher or by any script of the bundle;
-  * the bundle holds an unsigned or invalidly signed binary.
+  * the bundle holds an unsigned or invalidly signed binary;
+  * the Terminal welcome text (Contents/Resources/start/bin/winehelp, appdb) or the icon named by Info.plist is missing, or
+    the launcher no longer runs winehelp (the application then opens Terminal without the WineHQ banner);
+  * the 64-bit Direct3D files of one backend (d3d11_dxmt.dll, ...) sit next to an unsuffixed d3d11.dll,
+    dxgi.dll or d3d10core.dll: Wine would load that one instead (see check_d3d_names).
 
 Usage: verify-app.py "MNC Wine.app"
 Environment: OTOOL and CODESIGN override the tools.
 """
 
 import os
+import plistlib
 import re
 import subprocess
 import sys
@@ -30,11 +35,24 @@ BAD_LOCATION = re.compile(rb"/opt/homebrew|/usr/local/(?:Cellar|opt|lib|include)
 BARE_DYLIB = re.compile(rb"(?<![\w/@.+-])(lib[\w+.-]*\.dylib)\0")
 DYLD_VAR = re.compile(rb"\bDYLD_[A-Z_]+")
 
-# Strings in Wine's own code that are not locations the bundle depends on.
+# Strings that are not locations the bundle depends on.
+# Bare names opened by bundled third-party libraries for features Wine does not use: SDL's video
+# back ends (Wine uses SDL for game controllers only), x265's sibling libraries for other bit
+# depths (encoding), and Apple's own D3DMetal files, which cannot be edited.
 BARE_DYLIB_OK = {                # (file, name): optional libraries that stay off when they are not there
     # sdl2-compat, which Homebrew's sdl2 is, opens SDL3 by bare name; without it SDL stays off and
     # winebus uses IOHID.  Bundling SDL3 would not help, dyld does not look for a bare name in @rpath.
     ("libSDL2-2.0.0.dylib", "libSDL3.dylib"),
+} | {
+    ("libSDL2-2.0.0.dylib", name) for name in (
+        "libGLESv2.dylib", "libGLESv1_CM.dylib", "libGLES_CM.dylib", "libEGL.dylib",
+        "libvulkan.1.dylib", "libvulkan.dylib", "libMoltenVK.dylib")
+} | {
+    ("libx265.216.dylib", name) for name in (
+        "libx265.dylib", "libx265_main.dylib", "libx265_main10.dylib", "libx265_main12.dylib")
+} | {
+    ("libdxcompiler.dylib", "libdxcompiler.dylib"),
+    ("libdxccontainer.dylib", "libdxcompiler.dylib"),
 }
 # The search directories that winegcc, widl and wrc try after their own (the same as in upstream Wine).
 LOCATION_OK = {(tool, loc) for tool in ("winegcc", "widl", "wrc") for loc in ("/usr/local/lib", "/usr/local/include")}
@@ -47,6 +65,7 @@ DYLD_OK = {                      # ntdll.so points DYLD_LIBRARY_PATH at the buil
 THIRD_PARTY_DIR = "Contents/Resources/wine/lib"
 
 errors = []
+notes = []
 
 
 def fail(msg):
@@ -62,6 +81,13 @@ def is_macho(path):
         return False
     with open(path, "rb") as f:
         return f.read(4) in MAGICS
+
+
+def is_pe(path):
+    """Windows programs and libraries carry the paths of the compiler that built them (debug and
+    assert strings); they are not loaded by dyld."""
+    with open(path, "rb") as f:
+        return f.read(2) == b"MZ"
 
 
 def load_commands(path):
@@ -88,9 +114,16 @@ def expand(rpath, binary):
 
 def check_macho(path, rel):
     libs, rpaths = load_commands(path)
+    # lib/external holds the GPTK files exactly as Apple signed them: their run paths include
+    # Apple build-machine locations that don't exist anywhere, and cannot be edited without
+    # breaking the signature.  They must still not point at Homebrew or /usr/local.
+    apple = (os.sep + "lib" + os.sep + "external" + os.sep) in rel
     for r in rpaths:
-        if not r.startswith(("@loader_path", "@executable_path")):
-            fail("%s: run path %s is not relative" % (rel, r))
+        if r.startswith(("@loader_path", "@executable_path")):
+            continue
+        if apple and not BAD_LOCATION.search(r.encode()):
+            continue
+        fail("%s: run path %s is not relative" % (rel, r))
     ident = own_id(path)
     for lib in libs:
         if lib == ident or lib.startswith(SYSTEM):
@@ -105,6 +138,10 @@ def check_macho(path, rel):
         else:
             fail("%s: links %s outside the bundle" % (rel, lib))
     if sys.platform == "darwin" or os.environ.get("CODESIGN"):
+        # runtime_loader reads libRuntimeRosettax87 from disk and injects it as it is, so it is
+        # unsigned in rosettax87_jit and must stay that way
+        if os.path.basename(path) == "libRuntimeRosettax87":
+            return
         if run(CODESIGN, "--verify", "--strict", path).returncode:
             fail("%s: signature missing or invalid" % rel)
 
@@ -129,7 +166,10 @@ def check_bytes(path, rel, binary):
         # sections but not as a library location
         if text.startswith(("/Users/",)) or (base, text) in LOCATION_OK:
             continue
-        fail("%s: contains the location %s" % (rel, text))
+        if is_third_party(rel):
+            notes.append("%s: compiled for %s" % (rel, text))
+        else:
+            fail("%s: contains the location %s" % (rel, text))
         break
     if binary:
         for m in BARE_DYLIB.finditer(data):
@@ -138,6 +178,45 @@ def check_bytes(path, rel, binary):
     for m in DYLD_VAR.finditer(data) if own else ():
         if (base, m.group(0)) not in DYLD_OK:
             fail("%s: mentions %s" % (rel, m.group(0).decode()))
+
+
+def check_d3d_names(app):
+    """The backend files are builtin DLLs renamed after their backend; Wine looks the builtin of
+    such a file up by the name inside it (d3d11.dll), so an unsuffixed builtin of that name wins."""
+    folder = os.path.join(app, "Contents/Resources/wine/lib/wine/x86_64-windows")
+    for module in ("d3d11", "dxgi", "d3d10core"):
+        plain = os.path.join(folder, module + ".dll")
+        if not os.path.exists(plain):
+            continue
+        for backend in ("dxmt", "d3dm", "dxvk", "opengl", "openxr"):
+            if os.path.exists(os.path.join(folder, "%s_%s.dll" % (module, backend))):
+                fail("lib/wine/x86_64-windows/%s.dll hides %s_%s.dll: Wine loads it instead" % (module, module, backend))
+
+
+def check_launcher(app):
+    """Opening the application must behave like the WineHQ one: Terminal shows the welcome text of
+    start/bin/winehelp with start/bin in PATH, and the application has an icon."""
+    res = os.path.join(app, "Contents/Resources")
+    for script in ("winehelp", "appdb"):
+        path = os.path.join(res, "start/bin", script)
+        if not os.access(path, os.X_OK):
+            fail("Contents/Resources/start/bin/%s is missing or not executable" % script)
+    with open(os.path.join(app, "Contents/Info.plist"), "rb") as f:
+        info = plistlib.load(f)
+    icon = info.get("CFBundleIconFile")
+    if not icon:
+        fail("Info.plist has no CFBundleIconFile")
+    elif not os.path.isfile(os.path.join(res, icon if icon.endswith(".icns") else icon + ".icns")):
+        fail("the icon %s named by Info.plist is not in Contents/Resources" % icon)
+    launcher = os.path.join(app, "Contents/MacOS", info.get("CFBundleExecutable", ""))
+    if not os.path.isfile(launcher):
+        fail("the launcher Contents/MacOS/%s is missing" % info.get("CFBundleExecutable"))
+        return
+    with open(launcher, "rb") as f:
+        data = f.read()
+    for needle in (b"winehelp --clear", b"start/bin"):
+        if needle not in data:
+            fail("the launcher does not mention %s" % needle.decode())
 
 
 def main():
@@ -156,9 +235,13 @@ def main():
             if macho:
                 count += 1
                 check_macho(path, rel)
-            if macho or name.endswith((".sh", ".plist", ".command")) or os.access(path, os.X_OK):
+            if macho or name.endswith((".sh", ".plist", ".command")) or (os.access(path, os.X_OK) and not is_pe(path)):
                 if os.path.getsize(path) < 64 * 1024 * 1024:
                     check_bytes(path, rel, macho)
+    check_d3d_names(app)
+    check_launcher(app)
+    for n in notes:
+        print("note", n)
     for e in errors:
         print("FAIL", e)
     print("%d binaries checked, %d problems" % (count, len(errors)))

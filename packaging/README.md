@@ -3,18 +3,20 @@
 Turns a build of this tree into **MNC Wine.app**, the application that is released as
 `MNC-Wine-<version>-osx64.tar.xz`.
 
-Opening the application opens Terminal with `wine` first in `PATH`, as Wine Staging does.
+Opening the application opens Terminal with `wine` first in `PATH` and the welcome text of the WineHQ
+application ("Wine Is Not an Emulator", how to run `.exe` and `.msi`, `winecfg`, `appdb`).
 Opening a Windows program with it runs the program. Direct3D 9 to 11 programs run on DXMT and
-Direct3D 12 programs on D3DMetal (GPTK), unless `MNC_GAME_BACKEND` says otherwise (see below). The
-Win32-to-SwiftUI layer is on unless `WINE_MNC_NATIVE_UI=0`.
+Direct3D 12 programs on D3DMetal (GPTK), unless `MNC_GRAPHICS_ENGINE` says otherwise (see below). The
+Win32-to-SwiftUI layer is on unless `MNC_NATIVE_UI=0`.
 
 ## What is in this directory
 
 | File | What it does |
 | --- | --- |
-| `launcher/` | The program inside the bundle that opens Terminal or runs a program, and its `Info.plist`. |
+| `launcher/` | The program inside the bundle that opens Terminal or runs a program, and its `Info.plist`. `launcher/start/bin/winehelp` (the welcome text) and `appdb`, and `launcher/winehq.icns` (the Wine logo), are the files of the WineHQ application (LGPL, headers kept); `build-app.sh --icon` replaces the icon. |
 | `bundle-dylibs.py` | Copies the third-party libraries into the bundle and points every binary at them with `@rpath`. Removes every absolute run path. |
 | `verify-app.py` | Fails when the bundle still depends on the machine that built it (Homebrew, `/usr/local`, `DYLD_*`, bare-name `dlopen`, bad signature). |
+| `assemble-d3d.sh` | Builds the Direct3D set (GPTK/D3DMetal, DXMT, winemetal) and the Rosetta folder from the engine release named in the workflow (`ENGINE_REPO`, `ENGINE_TAG`), with no download from Apple. This is what the GitHub Actions build uses. |
 | `import-gptk.sh` | Builds the Direct3D set from a GPTK image and the `mnc-d3d` package. |
 | `build-app.sh` | Puts everything together, checks it, and writes the `.tar.xz`. |
 | `prerelease.sh` | Names and publishes the GitHub pre-release of a CI build (see below). |
@@ -58,7 +60,12 @@ packaging/build-app.sh --install-dir dist/opt/mnc-wine --d3d-dir d3d-set --w2s-d
 
 ## Direct3D backend choice
 
-* `MNC_GAME_BACKEND=d3dmetal|dxmt|dxvk|vr|opengl` (set by the backend app for every launch) decides, as before.
+* `MNC_GRAPHICS_ENGINE=d3dmetal|dxmt|dxvk|vr|opengl` (set by the backend app for every launch) decides, as before.
 * Without it, a 64-bit program gets DXMT, unless it imports `d3d12.dll` (also delay-imported) or has
   `D3D12Core.dll` next to it, in which case it gets D3DMetal. 32-bit programs keep Wine's own d3d.
-  A program that loads `d3d12.dll` later with `LoadLibrary` must be started with `MNC_GAME_BACKEND=d3dmetal`.
+  A program that loads `d3d12.dll` later with `LoadLibrary` must be started with `MNC_GRAPHICS_ENGINE=d3dmetal`.
+* To run one program on GPTK instead: `MNC_GRAPHICS_ENGINE=d3dmetal wine program.exe`.
+* The 64-bit `lib/wine/x86_64-windows` holds no unsuffixed `d3d11.dll`, `dxgi.dll` or `d3d10core.dll`. Wine finds
+  the builtin of `d3d11_dxmt.dll` (and of `d3d11_d3dm.dll`) by the name written inside the file, `d3d11.dll`, so an
+  unsuffixed file of that name would be loaded in their place: before this was fixed every program that was sent to
+  DXMT, Steam included, ran on GPTK. `verify-app.py` fails if one comes back.
