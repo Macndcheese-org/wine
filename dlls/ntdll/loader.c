@@ -4311,11 +4311,9 @@ static BOOL is_steam_client_process(void)
          * 2026-07-25: EA App (eadesktop.exe/ealauncher.exe/eacefsubprocess.exe) was
          * removed from it -- the "name-list matching doesn't scale to every CEF app"
          * concern this comment used to raise is now actually addressed: EA App launches
-         * as an ordinary "Application", which sets MNC_CEF_COMPAT_MODE, and the two things
-         * this list bought it are both covered generically -- the winegstreamer block by
-         * is_cef_compat_mode() below, and the d3d->DXMT routing by MNC_GRAPHICS_ENGINE=dxmt
-         * (the backend forces dxmt for the whole force_dxmt_cef launch class). Any new
-         * CEF launcher therefore works with NO engine change. Steam still needs the list
+         * as an ordinary application, and the two things this list bought it are both
+         * covered generically by is_cef_host_process() below (the winegstreamer block and the
+         * d3d->DXMT routing). Any new CEF launcher therefore works with NO engine change. Steam still needs the list
          * because it is launched as a launcher, not through that Application path. */
         static const WCHAR * const steam_exes[] =
         {
@@ -4366,32 +4364,9 @@ static BOOL is_steam_client_process(void)
     return cached;
 }
 
-/* MNC: generalizes the Steam/EA name-list above to any launch the backend already flagged
- * as CEF-risky (arbitrary "Applications" added via MacNdCheese, whose CEF/Electron helper
- * subprocesses have no fixed name to hardcode) -- set via MNC_CEF_COMPAT_MODE, inherited by
- * the whole process tree so it reaches those helpers regardless of what they're named. */
-static BOOL is_cef_compat_mode(void)
-{
-    static int cached = -1;
-
-    if (cached == -1)
-    {
-        UNICODE_STRING name, value;
-        WCHAR valbuf[4];
-
-        RtlInitUnicodeString( &name, L"MNC_CEF_COMPAT_MODE" );
-        value.Buffer = valbuf;
-        value.Length = 0;
-        value.MaximumLength = sizeof(valbuf);
-        cached = (!RtlQueryEnvironmentVariable_U( NULL, &name, &value ) &&
-                  value.Length >= sizeof(WCHAR) && valbuf[0] == '1');
-    }
-    return cached;
-}
-
-/* MNC: is THIS process a CEF host (browser or helper)? Same structural test kernelbase uses
- * for flag injection: a CEF app ships libcef.dll right next to its executable. Used to scope
- * the DXMT d3d routing to the processes that actually need it -- see steam_dxmt_redirect().
+/* MNC: is THIS process a CEF host (browser or helper)? A CEF app ships libcef.dll right next to
+ * its executable. Used to scope the DXMT d3d routing and the winegstreamer block to the processes
+ * that actually need them -- see steam_dxmt_redirect(). No exe name, no environment variable.
  * Probes the filesystem rather than the loaded-module list because the routing decision has
  * to be made on the FIRST d3d load, which can precede libcef's own load. */
 static BOOL is_cef_host_process(void)
@@ -4537,31 +4512,19 @@ static const WCHAR *steam_dxmt_redirect( const WCHAR *libname )
      * backend) becomes loadable, so block it for Steam processes -> CoCreateInstance
      * fails -> Steam falls back to its bundled cef\winh264.dll. GAMES keep winegstreamer
      * (system32) for MF video (RE-Engine intro etc). Same per-process split as d3d.
-     * is_cef_compat_mode() extends this to any CEF-compat-mode Application's own CEF
-     * helper subprocesses (see comment on that function) without needing their name added
-     * to steam_exes[] above -- gated on --type= so it never touches the Application's own
-     * top-level process or an unrelated child it spawns. */
-    /* 2026-07-25: use is_cef_compat_mode() (not a --type=-only test) so this covers the
-     * Application's OWN top-level process too, not just its --type= helpers. That top-level
-     * cover used to come from naming EADesktop.exe/EALauncher.exe in steam_exes[]; those names
-     * are gone now, so the generic flag has to carry it. Only ever true for Applications
-     * (force_dxmt_cef), never for games -- games keep winegstreamer for MF video as before. */
-    if ((is_steam_client_process() || is_cef_compat_mode()) &&
+     * is_cef_host_process() extends this to any CEF app and its helper subprocesses without
+     * needing their name added to steam_exes[] above. */
+    if ((is_steam_client_process() || is_cef_host_process()) &&
         (!wcsicmp( base, L"winegstreamer.dll" ) || !wcsicmp( base, L"winegstreamer" )))
     {
         TRACE( "mnc: blocking winegstreamer for steam/cef-compat-mode %s\n", debugstr_w(libname) );
         return L"winegstreamer_blocked_for_steam.dll";  /* non-existent -> DLL_NOT_FOUND */
     }
 
-    /* 2026-07-28: ...and any CEF host process of a CEF-compat-mode launch, for the same reason
-     * Steam is here -- CEF cannot render on D3DMetal. This used to be done by the BACKEND
-     * forcing MNC_GRAPHICS_ENGINE=dxmt for the whole launch, which also bound the GAME: picking
-     * D3DMetal on Battlefield 4's card silently ran it on DXMT, and DXMT's dxgi is the only
-     * one of our five builds missing the private DXGID3D10CreateDevice export that wine's own
-     * d3d10 calls -> "unimplemented function, aborting" before the menu. Scoping the redirect
-     * to the CEF processes lets the game honour the backend the user actually chose, while EA
-     * App's own processes still get DXMT. Structural, no exe names. */
-    if (is_steam_client_process() || (is_cef_compat_mode() && is_cef_host_process()))
+    /* ...and any CEF host process, for the same reason Steam is here -- CEF cannot render on
+     * D3DMetal. The routing is scoped to the CEF processes, so a game still honours the backend
+     * the user chose while a launcher's own CEF processes get DXMT. Structural, no exe names. */
+    if (is_steam_client_process() || is_cef_host_process())
     {
         /* Bradar Steam -> DXMT. The canonical d3d11.dll/dxgi.dll builtins are the D3DMetal
          * stubs (CEF cannot render on D3DMetal) so rewrite Steam d3d loads to the
