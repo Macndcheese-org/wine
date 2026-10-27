@@ -7,9 +7,11 @@ name: Build and Release
 # the bundle (packaging/).  Nothing in it may depend on Homebrew or on DYLD_* variables:
 # packaging/verify-app.py runs at the end and fails the build if anything does.
 #
-# What it does not contain: GPTK/D3DMetal, the DXMT builds and win32swiftui.  They come from
-# files that are not in this repository; packaging/README.md describes how the complete release is
-# assembled from this build with packaging/import-gptk.sh and packaging/build-app.sh.
+# What else goes into the bundle: GPTK/D3DMetal, the DXMT builds, winemetal and the Rosetta x87
+# JIT come from the engine release named by ENGINE_REPO and ENGINE_TAG (packaging/assemble-d3d.sh);
+# Wine Mono and Wine Gecko are downloaded from dl.winehq.org.  If one of them cannot be fetched the
+# build fails: nothing is released without them.  win32swiftui is not part of this build yet (it has
+# no CI of its own); packaging/README.md describes how a release with it is assembled by hand.
 #
 # A push to a branch builds and keeps the result as a run artifact.  A push to RELEASE_BRANCH also
 # publishes it as the pre-release "MacNdCheese Wine 11.20.0" (packaging/prerelease.sh): the next
@@ -27,6 +29,9 @@ permissions:
 
 env:
   RELEASE_BRANCH: mnc-11.20
+  # the engine release that supplies GPTK/D3DMetal, DXMT, winemetal and the Rosetta x87 JIT
+  ENGINE_REPO: Macndcheese-org/wine-old
+  ENGINE_TAG: 11.18.0
 
 concurrency:
   group: build-release-${{ github.ref }}
@@ -116,6 +121,27 @@ jobs:
       - name: Build
         run: make -C build64 -j"$(sysctl -n hw.ncpu)"
 
+      - name: Direct3D set, Rosetta x87 JIT, Wine Mono and Wine Gecko
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p parts
+          gh release download "$ENGINE_TAG" --repo "$ENGINE_REPO" \
+            --pattern wine-unified-osx64.tar.xz --dir parts --clobber
+          packaging/assemble-d3d.sh --engine parts/wine-unified-osx64.tar.xz \
+            --out parts/d3d-set --rosetta-out parts/rosetta
+          rm -f parts/wine-unified-osx64.tar.xz
+
+          mono=$(sed -n 's/^#define MONO_VERSION "\(.*\)"/\1/p' dlls/appwiz.cpl/addons.c)
+          gecko=$(sed -n 's/^#define GECKO_VERSION "\(.*\)"/\1/p' dlls/appwiz.cpl/addons.c)
+          mkdir -p parts/addons/mono parts/addons/gecko
+          curl -fL --retry 3 -o "parts/addons/mono/wine-mono-$mono-x86.msi" \
+            "https://dl.winehq.org/wine/wine-mono/$mono/wine-mono-$mono-x86.msi"
+          for arch in x86 x86_64; do
+            curl -fL --retry 3 -o "parts/addons/gecko/wine-gecko-$gecko-$arch.msi" \
+              "https://dl.winehq.org/wine/wine-gecko/$gecko/wine-gecko-$gecko-$arch.msi"
+          done
+
       - name: Release number
         id: number
         if: ${{ github.ref_name == env.RELEASE_BRANCH }}
@@ -134,6 +160,9 @@ jobs:
           packaging/build-app.sh \
             --install-dir "$GITHUB_WORKSPACE/dist/opt/mnc-wine" \
             --config-h build64/include/config.h \
+            --d3d-dir parts/d3d-set \
+            --rosetta-dir parts/rosetta \
+            --addons-dir parts/addons \
             --version "$VERSION" \
             --out "$GITHUB_WORKSPACE/out" \
             --archive

@@ -16,6 +16,7 @@ Win32-to-SwiftUI layer is on unless `MNC_NATIVE_UI=0`.
 | `launcher/` | The program inside the bundle that opens Terminal or runs a program, and its `Info.plist`. `launcher/start/bin/winehelp` (the welcome text) and `appdb`, and `launcher/winehq.icns` (the Wine logo), are the files of the WineHQ application (LGPL, headers kept); `build-app.sh --icon` replaces the icon. |
 | `bundle-dylibs.py` | Copies the third-party libraries into the bundle and points every binary at them with `@rpath`. Removes every absolute run path. |
 | `verify-app.py` | Fails when the bundle still depends on the machine that built it (Homebrew, `/usr/local`, `DYLD_*`, bare-name `dlopen`, bad signature). |
+| `assemble-d3d.sh` | Builds the Direct3D set (GPTK/D3DMetal, DXMT, winemetal) and the Rosetta folder from the engine release named in the workflow (`ENGINE_REPO`, `ENGINE_TAG`), with no download from Apple. This is what the GitHub Actions build uses. |
 | `import-gptk.sh` | Builds the Direct3D set from a GPTK image and the `mnc-d3d` package. |
 | `build-app.sh` | Puts everything together, checks it, and writes the `.tar.xz`. |
 | `prerelease.sh` | Names and publishes the GitHub pre-release of a CI build (see below). |
