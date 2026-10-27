@@ -4526,6 +4526,15 @@ static const WCHAR *steam_dxmt_redirect( const WCHAR *libname )
      * the user chose while a launcher's own CEF processes get DXMT. Structural, no exe names. */
     if (is_steam_client_process() || is_cef_host_process())
     {
+        /* Direct3D 12 only exists as D3DMetal, which a CEF host cannot run on, and its GPU process loads
+         * d3d12.dll on its own while it collects the GPU information (it takes a missing one for a system
+         * without Direct3D 12): D3DMetal's stub then calls through a function it never resolved and the
+         * GPU process dies. A CEF host that is itself a Direct3D 12 program keeps the d3d12 it asks for. */
+        if ((!wcsicmp( base, L"d3d12.dll" ) || !wcsicmp( base, L"d3d12" )) && !is_dx12_process())
+        {
+            TRACE( "mnc: no Direct3D 12 for %s in a CEF host\n", debugstr_w(libname) );
+            return L"d3d12_blocked_for_cef.dll";  /* non-existent -> DLL_NOT_FOUND */
+        }
         /* Bradar Steam -> DXMT. The canonical d3d11.dll/dxgi.dll builtins are the D3DMetal
          * stubs (CEF cannot render on D3DMetal) so rewrite Steam d3d loads to the
          * DXMT builds shipped as _dxmt.dll. Non-d3d libs pass through unchanged. */
