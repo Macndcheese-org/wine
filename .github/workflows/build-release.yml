@@ -11,15 +11,26 @@ name: Build and Release
 # files that are not in this repository; packaging/README.md describes how the complete release is
 # assembled from this build with packaging/import-gptk.sh and packaging/build-app.sh.
 #
-# A push to a branch builds and keeps the result as a run artifact.  A push to RELEASE_BRANCH also
-# publishes it as the pre-release "MacNdCheese Wine 11.20.0" (packaging/prerelease.sh): the next
-# build replaces it until the release is marked as stable on GitHub, and the builds after that
-# publish 11.20.1, and so on.
+# A push to a branch builds and keeps the result as a run artifact.
+#
+# Publishing is off until the build is complete.  The bundle made here has Wine and its libraries
+# only; a release also needs rosettax87, the DXMT DLLs and GPTK/D3DMetal, which CI cannot fetch yet
+# (GPTK is Apple's and is not in this repository; the older builds that have it are in a private
+# repository of another account).  A release is made by hand until then.
+#
+# Running the workflow by hand on RELEASE_BRANCH with "publish" ticked publishes the build as the
+# pre-release "MacNdCheese Wine 11.20.0" (packaging/prerelease.sh): the next one replaces it until
+# the release is marked as stable on GitHub, and the ones after that are 11.20.1, and so on.
 
 on:
   push:
     branches: ['mnc-**']
   workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish this build as a pre-release (only on the release branch)'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -118,7 +129,7 @@ jobs:
 
       - name: Release number
         id: number
-        if: ${{ github.ref_name == env.RELEASE_BRANCH }}
+        if: ${{ inputs.publish && github.ref_name == env.RELEASE_BRANCH }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: echo "tag=$(packaging/prerelease.sh tag)" >> "$GITHUB_OUTPUT"
@@ -157,7 +168,7 @@ jobs:
           retention-days: 7
 
       - name: Publish the pre-release
-        if: ${{ github.ref_name == env.RELEASE_BRANCH }}
+        if: ${{ inputs.publish && github.ref_name == env.RELEASE_BRANCH }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: packaging/prerelease.sh publish "${{ steps.number.outputs.tag }}" "out/${{ steps.package.outputs.asset }}"
