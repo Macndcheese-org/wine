@@ -1421,6 +1421,150 @@ struct client_surface *macdrv_w2s_create_host_surface(HWND hwnd, UINT message, v
     return &host->client;
 }
 
+/* A client surface for the Metal layer that another process draws into a child window: its view
+ * holds the CALayerHost, and update_client_surfaces() keeps the view on the client area of the window
+ * when the toplevel window moves, is resized or shown. The format is never a pixel format, so the
+ * GL and Vulkan paths never pick the surface up from the unused list. */
+#define REMOTE_LAYER_FORMAT 0x6d6c7200
+
+struct macdrv_remote_layer
+{
+    struct client_surface   client;
+    struct list             entry;
+    macdrv_view             cocoa_view;
+    unsigned int            context_id;
+    bool                    detached;
+};
+
+static struct list remote_layers = LIST_INIT(remote_layers);
+static pthread_mutex_t remote_layers_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static void macdrv_remote_layer_destroy(struct client_surface *client)
+{
+    TRACE("%s\n", debugstr_client_surface(client));
+}
+
+static void macdrv_remote_layer_detach(struct client_surface *client)
+{
+    struct macdrv_remote_layer *layer = CONTAINING_RECORD(client, struct macdrv_remote_layer, client);
+
+    TRACE("%s\n", debugstr_client_surface(client));
+
+    if (layer->cocoa_view)
+    {
+        macdrv_view_release_ca_layer_host(layer->cocoa_view, layer->context_id);
+        macdrv_dispose_view(layer->cocoa_view);
+        layer->cocoa_view = NULL;
+    }
+    layer->detached = true;
+}
+
+static void macdrv_remote_layer_update(struct client_surface *client)
+{
+    struct macdrv_remote_layer *layer = CONTAINING_RECORD(client, struct macdrv_remote_layer, client);
+    struct macdrv_win_data *data;
+
+    TRACE("%s\n", debugstr_client_surface(client));
+
+    if (!layer->cocoa_view || !(data = get_win_data(client->toplevel))) return;
+    macdrv_set_view_frame(layer->cocoa_view, cgrect_from_rect(client->monitor_rect));
+    macdrv_set_view_superview(layer->cocoa_view, data->client_view, data->cocoa_window, NULL, NULL);
+    macdrv_set_view_hidden(layer->cocoa_view, !NtUserIsWindowVisible(client->hwnd));
+    release_win_data(data);
+}
+
+static void macdrv_remote_layer_present(struct client_surface *client, HDC hdc)
+{
+}
+
+static const struct client_surface_funcs macdrv_remote_layer_funcs =
+{
+    .size = sizeof(struct macdrv_remote_layer),
+    .destroy = macdrv_remote_layer_destroy,
+    .detach = macdrv_remote_layer_detach,
+    .update = macdrv_remote_layer_update,
+    .present = macdrv_remote_layer_present,
+};
+
+/* Drops the layers of windows that were destroyed before their release message arrived. */
+static void release_detached_remote_layers(void)
+{
+    struct macdrv_remote_layer *layer, *next;
+
+    LIST_FOR_EACH_ENTRY_SAFE(layer, next, &remote_layers, struct macdrv_remote_layer, entry)
+    {
+        if (!layer->detached) continue;
+        list_remove(&layer->entry);
+        client_surface_release(&layer->client);
+    }
+}
+
+static void create_remote_layer(HWND child, unsigned int context_id)
+{
+    struct macdrv_remote_layer *layer;
+
+    if (!(layer = client_surface_create(&macdrv_remote_layer_funcs, child, REMOTE_LAYER_FORMAT, FALSE))) return;
+    layer->context_id = context_id;
+    layer->cocoa_view = macdrv_create_view(cgrect_from_rect(layer->client.monitor_rect));
+    macdrv_view_create_ca_layer_host(layer->cocoa_view, context_id);
+
+    pthread_mutex_lock(&remote_layers_mutex);
+    release_detached_remote_layers();
+    list_add_tail(&remote_layers, &layer->entry);
+    pthread_mutex_unlock(&remote_layers_mutex);
+
+    use_window_client_surface(&layer->client, TRUE);
+}
+
+static void release_remote_layer(unsigned int context_id)
+{
+    struct macdrv_remote_layer *layer;
+
+    pthread_mutex_lock(&remote_layers_mutex);
+    LIST_FOR_EACH_ENTRY(layer, &remote_layers, struct macdrv_remote_layer, entry)
+    {
+        if (layer->context_id != context_id) continue;
+        list_remove(&layer->entry);
+        client_surface_release(&layer->client);
+        break;
+    }
+    release_detached_remote_layers();
+    pthread_mutex_unlock(&remote_layers_mutex);
+}
+
+/* The window that gets WM_MACDRV_CREATE_REMOTE_LAYER and WM_MACDRV_RELEASE_REMOTE_LAYER is the one
+ * the other process draws into, wparam is the window to host the layer for, or 0 for hwnd. The layer
+ * is hosted by the process that owns the toplevel window. */
+static void handle_remote_layer_message(UINT msg, HWND hwnd, WPARAM wp, unsigned int context_id)
+{
+    HWND child = wp ? (HWND)wp : hwnd, toplevel = NtUserGetAncestor(child, GA_ROOT);
+    BOOL create = msg == WM_MACDRV_CREATE_REMOTE_LAYER;
+    struct macdrv_win_data *data = get_win_data(toplevel);
+
+    TRACE("create %u child %p toplevel %p context_id %u\n", create, child, toplevel, context_id);
+
+    if (!data)
+    {
+        if (toplevel && toplevel != hwnd) NtUserPostMessage(toplevel, msg, (WPARAM)child, context_id);
+        return;
+    }
+
+    if (child == toplevel)
+    {
+        if (data->cocoa_window)
+        {
+            if (create) macdrv_window_create_ca_layer_host_view(data->cocoa_window, context_id);
+            else macdrv_window_release_ca_layer_host_view(data->cocoa_window, context_id);
+        }
+        release_win_data(data);
+        return;
+    }
+    release_win_data(data);
+
+    if (create) create_remote_layer(child, context_id);
+    else release_remote_layer(context_id);
+}
+
 bool macdrv_client_surface_acquire_metal_swapchain(struct macdrv_client_surface *surface)
 {
     HWND hwnd = surface->client.hwnd;
@@ -1428,7 +1572,10 @@ bool macdrv_client_surface_acquire_metal_swapchain(struct macdrv_client_surface 
 
     if (surface->metal_swapchain) return true;
 
-    if ((data = get_win_data(hwnd)))
+    /* The view of the surface goes into the view hierarchy of the toplevel window, which only
+     * works in the process that owns it. Otherwise the swapchain is exported as a remote layer
+     * that the owner of the toplevel window hosts over the client area of the window. */
+    if ((data = get_win_data(surface->client.toplevel)))
     {
         release_win_data(data);
         surface->metal_swapchain = macdrv_create_view_swapchain(surface->cocoa_view);
@@ -1436,12 +1583,6 @@ bool macdrv_client_surface_acquire_metal_swapchain(struct macdrv_client_surface 
     else
     {
         RECT rect;
-
-        if (NtUserGetAncestor(hwnd, GA_ROOT) != hwnd)
-        {
-            FIXME("Cross-process child window Metal swapchains are not implemented\n");
-            return false;
-        }
 
         if (!NtUserGetClientRect(hwnd, &rect, NtUserGetWinMonitorDpi(hwnd, MDT_RAW_DPI))) return false;
         surface->metal_swapchain = macdrv_create_offscreen_swapchain(hwnd, cgrect_from_rect(rect));
@@ -1841,20 +1982,8 @@ LRESULT macdrv_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         TRACE("WM_MACDRV_ACTIVATE_ON_FOLLOWING_FOCUS time %u\n", activate_on_focus_time);
         return 0;
     case WM_MACDRV_CREATE_REMOTE_LAYER:
-        if ((data = get_win_data(hwnd)))
-        {
-            TRACE("WM_MACDRV_CREATE_REMOTE_LAYER context_id %u\n", (unsigned int)lp);
-            if (data->cocoa_window) macdrv_window_create_ca_layer_host_view(data->cocoa_window, (unsigned int)lp);
-            release_win_data(data);
-        }
-        return 0;
     case WM_MACDRV_RELEASE_REMOTE_LAYER:
-        if ((data = get_win_data(hwnd)))
-        {
-            TRACE("WM_MACDRV_RELEASE_REMOTE_LAYER context_id %u\n", (unsigned int)lp);
-            if (data->cocoa_window) macdrv_window_release_ca_layer_host_view(data->cocoa_window, (unsigned int)lp);
-            release_win_data(data);
-        }
+        handle_remote_layer_message(msg, hwnd, wp, (unsigned int)lp);
         return 0;
     }
 

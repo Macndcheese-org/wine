@@ -29,6 +29,7 @@
 
 #include <stdlib.h>
 
+#include <ApplicationServices/ApplicationServices.h>
 #include <Security/AuthSession.h>
 #include <IOKit/pwr_mgt/IOPMLib.h>
 
@@ -267,6 +268,63 @@ static inline DWORD get_config_key(HKEY defkey, HKEY appkey, const char *name,
 
 
 /***********************************************************************
+ *              main_display_is_retina
+ *
+ * Whether the main display shows more pixels than points (a Retina display).
+ */
+static bool main_display_is_retina(void)
+{
+    CGDisplayModeRef mode = CGDisplayCopyDisplayMode(CGMainDisplayID());
+    bool ret = false;
+
+    if (mode)
+    {
+        ret = CGDisplayModeGetPixelWidth(mode) > CGDisplayModeGetWidth(mode);
+        CGDisplayModeRelease(mode);
+    }
+    return ret;
+}
+
+
+/***********************************************************************
+ *              set_retina_defaults
+ *
+ * A prefix that says nothing about Retina mode, on a Retina display, runs in Retina
+ * mode with a system DPI of 192 (what Retina mode is meant to be paired with).  The
+ * values are written to the registry so that every process of the prefix, and the
+ * user, see the same settings; a prefix that already has them is left alone.
+ */
+static void set_retina_defaults(void)
+{
+    static const WCHAR retinaW[] = {'R','e','t','i','n','a','M','o','d','e',0};
+    static const WCHAR yW[] = {'y',0};
+    static const WCHAR logpixelsW[] = {'L','o','g','P','i','x','e','l','s',0};
+    HKEY parent, key;
+    UNICODE_STRING name;
+    DWORD dpi = 192;
+    char buf[64];
+
+    if ((parent = open_hkcu_key("Software\\Wine")))
+    {
+        if ((key = reg_create_ascii_key(parent, "Mac Driver", 0, NULL)))
+        {
+            RtlInitUnicodeString(&name, retinaW);
+            NtSetValueKey(key, &name, 0, REG_SZ, (void *)yW, sizeof(yW));
+            NtClose(key);
+        }
+        NtClose(parent);
+    }
+    if ((key = open_hkcu_key("Control Panel\\Desktop")))
+    {
+        RtlInitUnicodeString(&name, logpixelsW);
+        if (!query_reg_value(key, logpixelsW, (void *)buf, sizeof(buf)))
+            NtSetValueKey(key, &name, 0, REG_DWORD, &dpi, sizeof(dpi));
+        NtClose(key);
+    }
+}
+
+
+/***********************************************************************
  *              setup_options
  *
  * Set up the Mac driver options.
@@ -386,6 +444,11 @@ static void setup_options(void)
        processes in the prefix. */
     if (!get_config_key(hkey, NULL, "RetinaMode", buffer, sizeof(buffer)))
         retina_enabled = IS_OPTION_TRUE(buffer[0]);
+    else if (main_display_is_retina())
+    {
+        retina_enabled = true;
+        set_retina_defaults();
+    }
 
     retina_on = retina_enabled;
 

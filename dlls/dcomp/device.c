@@ -20,6 +20,7 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <assert.h>
+#include <math.h>
 
 #include "ntstatus.h"
 #define WIN32_NO_STATUS
@@ -405,8 +406,59 @@ done:
     return hr;
 }
 
+/* Where a visual is on the target: its coordinates are mapped to the client area of the target window by
+ * "matrix" and what is outside of "clip", also in client coordinates, is not painted. */
+struct composite_state
+{
+    D2D_MATRIX_3X2_F matrix;
+    BOOL has_clip;
+    RECT clip;
+};
+
+/* Both matrices use the row vector convention of Direct2D: "a" applies first. */
+static D2D_MATRIX_3X2_F matrix_multiply(const D2D_MATRIX_3X2_F *a, const D2D_MATRIX_3X2_F *b)
+{
+    D2D_MATRIX_3X2_F ret;
+
+    ret._11 = a->_11 * b->_11 + a->_12 * b->_21;
+    ret._12 = a->_11 * b->_12 + a->_12 * b->_22;
+    ret._21 = a->_21 * b->_11 + a->_22 * b->_21;
+    ret._22 = a->_21 * b->_12 + a->_22 * b->_22;
+    ret._31 = a->_31 * b->_11 + a->_32 * b->_21 + b->_31;
+    ret._32 = a->_31 * b->_12 + a->_32 * b->_22 + b->_32;
+    return ret;
+}
+
+/* The smallest integer rectangle that contains the rectangle once mapped by the matrix. */
+static RECT matrix_transform_rect(const D2D_MATRIX_3X2_F *matrix, float left, float top, float right, float bottom)
+{
+    const float x[4] = {left, right, left, right};
+    const float y[4] = {top, top, bottom, bottom};
+    float min_x = 0.0f, min_y = 0.0f, max_x = 0.0f, max_y = 0.0f;
+    unsigned int i;
+    RECT ret;
+
+    for (i = 0; i < 4; ++i)
+    {
+        float tx = x[i] * matrix->_11 + y[i] * matrix->_21 + matrix->_31;
+        float ty = x[i] * matrix->_12 + y[i] * matrix->_22 + matrix->_32;
+
+        if (!i || tx < min_x) min_x = tx;
+        if (!i || tx > max_x) max_x = tx;
+        if (!i || ty < min_y) min_y = ty;
+        if (!i || ty > max_y) max_y = ty;
+    }
+
+    ret.left = floorf(min_x);
+    ret.top = floorf(min_y);
+    ret.right = ceilf(max_x);
+    ret.bottom = ceilf(max_y);
+    return ret;
+}
+
 static void do_composite_dxgi_surface(const struct composition_target *target,
                                       const struct composition_visual *visual,
+                                      const struct composite_state *composite_state,
                                       IDXGISurface *dxgi_surface)
 {
     ID3DDeviceContextState *state = NULL, *old_state = NULL;
@@ -422,6 +474,7 @@ static void do_composite_dxgi_surface(const struct composition_target *target,
     ID2D1Image *old_target = NULL;
     HDC dst_dc, src_dc;
     D2D1_SIZE_U size;
+    RECT dst_rect;
     DWORD style;
     HRESULT hr;
 
@@ -553,7 +606,14 @@ static void do_composite_dxgi_surface(const struct composition_target *target,
     if (!target->topmost)
         style |= DCX_CLIPCHILDREN;
     dst_dc = GetDCEx(target->hwnd, 0, style);
-    GdiAlphaBlend(dst_dc, 0, 0, size.width, size.height, src_dc, 0, 0, size.width, size.height, blend_func);
+    dst_rect = matrix_transform_rect(&composite_state->matrix, 0.0f, 0.0f, size.width, size.height);
+    TRACE("visual %p, source size %ux%u, destination %s, clip %s, target %p.\n", visual, size.width, size.height,
+            wine_dbgstr_rect(&dst_rect), composite_state->has_clip ? wine_dbgstr_rect(&composite_state->clip) : "none", target->hwnd);
+    if (composite_state->has_clip)
+        IntersectClipRect(dst_dc, composite_state->clip.left, composite_state->clip.top,
+                          composite_state->clip.right, composite_state->clip.bottom);
+    GdiAlphaBlend(dst_dc, dst_rect.left, dst_rect.top, dst_rect.right - dst_rect.left, dst_rect.bottom - dst_rect.top,
+                  src_dc, 0, 0, size.width, size.height, blend_func);
     ReleaseDC(target->hwnd, dst_dc);
 
     ID2D1GdiInteropRenderTarget_ReleaseDC(visual->interop, NULL);
@@ -607,17 +667,38 @@ static struct composition_visual * shared_visual_target_get_root(HANDLE shared_v
     return visual;
 }
 
-static HRESULT do_composite(const struct composition_target *target, struct composition_visual *visual)
+static HRESULT do_composite(const struct composition_target *target, struct composition_visual *visual,
+        const struct composite_state *parent_state)
 {
     struct composition_visual *child_visual;
+    struct composite_state composite_state;
+    D2D_MATRIX_3X2_F offset = {{{1.0f, 0.0f, 0.0f, 1.0f, visual->offset_x, visual->offset_y}}};
+    D2D_MATRIX_3X2_F local;
     IDXGISurface *dxgi_surface;
     HRESULT hr;
+
+    /* The transform of a visual applies to the visual, then the offset places it in its parent. */
+    local = matrix_multiply(&visual->transform, &offset);
+    composite_state.matrix = matrix_multiply(&local, &parent_state->matrix);
+    composite_state.has_clip = parent_state->has_clip;
+    composite_state.clip = parent_state->clip;
+    if (visual->has_clip)
+    {
+        RECT clip = matrix_transform_rect(&composite_state.matrix, visual->clip.left, visual->clip.top,
+                                          visual->clip.right, visual->clip.bottom);
+
+        if (composite_state.has_clip)
+            IntersectRect(&composite_state.clip, &composite_state.clip, &clip);
+        else
+            composite_state.clip = clip;
+        composite_state.has_clip = TRUE;
+    }
 
     if (visual->shared_visual_handle)
     {
         struct composition_visual *root = shared_visual_target_get_root(visual->shared_visual_handle);
         if (root)
-            do_composite(target, root);
+            do_composite(target, root, &composite_state);
     }
 
     /* Render content */
@@ -687,13 +768,13 @@ static HRESULT do_composite(const struct composition_target *target, struct comp
             return E_FAIL;
         }
 
-        do_composite_dxgi_surface(target, visual, dxgi_surface);
+        do_composite_dxgi_surface(target, visual, &composite_state, dxgi_surface);
         IDXGISurface_Release(dxgi_surface);
     }
 
     LIST_FOR_EACH_ENTRY(child_visual, &visual->child_visuals, struct composition_visual, entry)
     {
-        do_composite(target, child_visual);
+        do_composite(target, child_visual, &composite_state);
     }
 
     return S_OK;
@@ -706,6 +787,7 @@ static DWORD WINAPI composite_thread_proc(void *iface)
     unsigned int count, frequency, refresh_period;
     struct composition_target *target;
     struct composition_visual *visual;
+    struct composite_state root_state = {{{{1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f}}}};
     HDC hdc;
 
     /* TODO: Implement and use D3DKMTWaitForVerticalBlankEvent() */
@@ -733,7 +815,7 @@ static DWORD WINAPI composite_thread_proc(void *iface)
                 continue;
 
             visual = impl_from_IDCompositionVisual(target->root);
-            if (SUCCEEDED(do_composite(target, visual)))
+            if (SUCCEEDED(do_composite(target, visual, &root_state)))
                 count++;
         }
 

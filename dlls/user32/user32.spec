@@ -433,7 +433,7 @@
 @ stub DrawFrame
 @ stdcall DrawFrameControl(long ptr long long)
 @ stdcall DrawIcon(long long long long)
-@ stdcall DrawIconEx(long long long long long long long long long) NtUserDrawIconEx
+@ stdcall DrawIconEx(long long long long long long long long long)
 @ stdcall DrawMenuBar(long) NtUserDrawMenuBar
 @ stdcall DrawMenuBarTemp(long long ptr long long) NtUserDrawMenuBarTemp
 @ stdcall DrawStateA(long long ptr long long long long long long long)
@@ -1230,3 +1230,4 @@
 @ varargs wsprintfW(wstr wstr)
 @ stdcall wvsprintfA(ptr str ptr)
 @ stdcall wvsprintfW(ptr wstr ptr)
+@ stdcall W2SOpenFolder(wstr)

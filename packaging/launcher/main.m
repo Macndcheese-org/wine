@@ -2,7 +2,8 @@
  * Launcher of the MNC Wine application bundle.
  *
  * Opening the application without a document opens a Terminal window whose shell has Wine's
- * bin directory first in PATH, the way the Wine Staging application does.  Opening a Windows
+ * bin directory first in PATH and shows the welcome text of the WineHQ application (start/bin/winehelp,
+ * taken from its packaging, with appdb).  Opening a Windows
  * program with it (double click, "Open With", drop on the Dock icon) runs the program with
  * "wine start /unix" and does not open Terminal.
  *
@@ -21,6 +22,11 @@ static NSString *WineBinDirectory(void)
     return [[[NSBundle mainBundle] resourcePath] stringByAppendingPathComponent:@"wine/bin"];
 }
 
+static NSString *StartDirectory(void)
+{
+    return [[[NSBundle mainBundle] resourcePath] stringByAppendingPathComponent:@"start/bin"];
+}
+
 static NSString *ShellQuote(NSString *string)
 {
     return [NSString stringWithFormat:@"'%@'", [string stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"]];
@@ -37,8 +43,8 @@ static void OpenTerminal(void)
     /* setenv() works in csh and tcsh; the test defines it for the shells that only know export. */
     NSString *command = [NSString stringWithFormat:
         @"test \"$?BASH_VERSION\" = \"0\" || eval 'setenv() { export \"$1=$2\"; }'; "
-        @"setenv PATH %@:\"$PATH\"; clear; wine --version",
-        ShellQuote(WineBinDirectory())];
+        @"setenv PATH %@:%@:\"$PATH\"; winehelp --clear",
+        ShellQuote(WineBinDirectory()), ShellQuote(StartDirectory())];
     NSString *source = [NSString stringWithFormat:
         @"tell application \"Terminal\"\n activate\n do script %@\nend tell", AppleScriptQuote(command)];
     NSDictionary *error = nil;

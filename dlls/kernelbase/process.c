@@ -561,9 +561,9 @@ static const WCHAR *hack_append_command_line( const WCHAR *cmd, const WCHAR *cmd
     {
         /* MNC: the GPU entries this table shipped with are gone -- steamwebhelper,
          * Battle.net, GalaxyClient (+2 GOG helpers), RSI Launcher, EADesktop and Link2EA.
-         * CEF/GPU switches come from one place now: the MNC_WEBHELPER_FLAGS block further
+         * CEF/GPU switches come from one place now: the MNC_CEF_FLAGS block further
          * down, which picks its targets structurally (a libcef.dll sat beside the exe, or
-         * a Chromium --type= child under a CEF-safe-mode launch) rather than from a name
+         * a Chromium --type= child under a CEF-compat-mode launch) rather than from a name
          * list, and hands over the full ANGLE -> d3d11 -> DXMT set plus the adapter spoof
          * instead of --in-process-gpu alone. For the three this table and that block both
          * matched, its version was a strict subset appended just ahead of the real one.
@@ -590,14 +590,14 @@ static const WCHAR *hack_append_command_line( const WCHAR *cmd, const WCHAR *cmd
 }
 
 /* MNC: generalizes the steamwebhelper.exe/EADesktop.exe-etc name checks below to any launch
- * the backend already flagged as CEF-risky via MNC_CEF_SAFE_MODE (arbitrary "Applications"
+ * the backend already flagged as CEF-risky via MNC_CEF_COMPAT_MODE (arbitrary "Applications"
  * added through MacNdCheese, whose CEF/Electron helper subprocesses have no fixed name to
  * hardcode) -- inherited by the whole process tree, same mechanism as ntdll/loader.c's own
  * copy of this helper (separate DLL, can't share the static). */
-static BOOL is_cef_safe_mode(void)
+static BOOL is_cef_compat_mode(void)
 {
     char buf[4];
-    DWORD len = GetEnvironmentVariableA( "MNC_CEF_SAFE_MODE", buf, sizeof(buf) );
+    DWORD len = GetEnvironmentVariableA( "MNC_CEF_COMPAT_MODE", buf, sizeof(buf) );
     return len > 0 && buf[0] == '1';
 }
 
@@ -711,11 +711,11 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR 
 
     TRACE( "app %s cmdline %s after all hacks\n", debugstr_w(app_name), debugstr_w(tidy_cmdline) );
     /* MNC: append extra CEF switches to steamwebhelper.exe, the Rockstar SocialClubHelper.exe,
-     * or (via is_cef_safe_mode()) ANY child process spawned under a CEF-safe-mode Application
-     * launch, from MNC_WEBHELPER_FLAGS.
+     * or (via is_cef_compat_mode()) ANY child process spawned under a CEF-compat-mode Application
+     * launch, from MNC_CEF_FLAGS.
      * 2026-07-25: EA App's EADesktop.exe/EALauncher.exe/EACefSubProcess.exe used to be named
      * here too; they are gone now -- EA App launches as an ordinary "Application", so
-     * is_cef_safe_mode() covers its whole process tree, and is_cef_host_image() covers the
+     * is_cef_compat_mode() covers its whole process tree, and is_cef_host_image() covers the
      * browser process the way naming EADesktop.exe used to. (The backend also puts these on
      * the argv of the exe IT starts, but that only covers apps we start directly: a launcher
      * chain -- EALauncher.exe -> EALaunchHelper.exe -> EADesktop.exe -- rebuilds its child's
@@ -729,10 +729,10 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR 
      * the crashpad-handler. */
     {
         char wf[900];
-        DWORD wflen = GetEnvironmentVariableA( "MNC_WEBHELPER_FLAGS", wf, sizeof(wf) );
+        DWORD wflen = GetEnvironmentVariableA( "MNC_CEF_FLAGS", wf, sizeof(wf) );
         if (wflen > 0 && wflen < sizeof(wf) && wf[0] && app_name && tidy_cmdline
-            /* MNC FIX: is_cef_safe_mode() alone is too broad -- it's set for the WHOLE
-             * process tree of a CEF-safe-mode Application, including ordinary non-CEF
+            /* MNC FIX: is_cef_compat_mode() alone is too broad -- it's set for the WHOLE
+             * process tree of a CEF-compat-mode Application, including ordinary non-CEF
              * children it spawns (e.g. an installer shelling out to regedit.exe to import
              * a .reg file). Confirmed live: a VS Code installer's regedit.exe registry-
              * import step got these flags appended, and regedit doesn't understand "--"
@@ -743,7 +743,7 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR 
              * subprocess, never an unrelated helper like regedit. */
             /* 2026-07-25: ...OR the CEF browser process itself (is_cef_host_image), which has
              * no --type= but is the one process that has to get these -- see that helper. */
-            && ((is_cef_safe_mode() && (wcsstr( tidy_cmdline, L"--type=" ) || is_cef_host_image( app_name )))
+            && ((is_cef_compat_mode() && (wcsstr( tidy_cmdline, L"--type=" ) || is_cef_host_image( app_name )))
                 || wcsstr( app_name, L"steamwebhelper.exe" ) || wcsstr( app_name, L"SocialClubHelper.exe" ))
             /* deliberately NOT skipped when the switches are already present: a launcher that
              * forwards its own argv (EALauncher.exe -> EALaunchHelper.exe) then gets a second
@@ -768,8 +768,8 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR 
         }
     }
 
-    /* MNC: optional extra switches for a CEF-safe-mode launch, from
-     * MNC_EA_WEBHELPER_EXTRA_FLAGS. Nothing sets this by default any more -- it is a manual
+    /* MNC: optional extra switches for a CEF-compat-mode launch, from
+     * MNC_CEF_APP_EXTRA_FLAGS. Nothing sets this by default any more -- it is a manual
      * escape hatch for a CEF app that needs something extra, kept because it costs nothing
      * and needs no per-app name list.
      *
@@ -778,7 +778,7 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR 
      * by a different process, which DXMT rejects ("cross-process swapchain not supported
      * yet", d3d11_swapchain.cpp). Measured on EA App, and that was wrong twice over:
      *
-     *  - It was never needed. --in-process-gpu (already in MNC_WEBHELPER_FLAGS) puts the GPU
+     *  - It was never needed. --in-process-gpu (already in MNC_CEF_FLAGS) puts the GPU
      *    in the browser process, which is the process that owns the HWND, so ordinary
      *    multi-process CEF gives zero GPU-process crashes, zero cross-process swapchain
      *    rejections and zero "Failed to get metal layer". The blue-window run that motivated
@@ -790,13 +790,13 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR 
      *    hung 30s before leaving the UI stuck on the login page. CEF documents single-process
      *    as debug-only.
      *
-     * Same gating as the MNC_WEBHELPER_FLAGS block above (--type= helper OR the CEF browser
+     * Same gating as the MNC_CEF_FLAGS block above (--type= helper OR the CEF browser
      * process itself), for the same reasons. */
     {
         char ef[300];
-        DWORD eflen = GetEnvironmentVariableA( "MNC_EA_WEBHELPER_EXTRA_FLAGS", ef, sizeof(ef) );
+        DWORD eflen = GetEnvironmentVariableA( "MNC_CEF_APP_EXTRA_FLAGS", ef, sizeof(ef) );
         if (eflen > 0 && eflen < sizeof(ef) && ef[0] && app_name && tidy_cmdline
-            && is_cef_safe_mode()
+            && is_cef_compat_mode()
             && (wcsstr( tidy_cmdline, L"--type=" ) || is_cef_host_image( app_name ))
             && !wcsstr( tidy_cmdline, L"--type=crashpad-handler" ))
         {

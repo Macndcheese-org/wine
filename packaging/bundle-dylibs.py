@@ -40,9 +40,14 @@ def is_macho(path):
 
 
 def macho_files(prefix):
+    # lib/external holds the GPTK files (D3DMetal.framework, libd3dshared.dylib): Apple's own
+    # signature, run paths and libraries (libmetalirconverter inside the framework) stay as they are.
+    external = os.path.join(prefix, "lib", "external") + os.sep
     for root, _, names in os.walk(prefix):
         for name in names:
             path = os.path.join(root, name)
+            if path.startswith(external):
+                continue
             if is_macho(path):
                 yield path
 
@@ -65,6 +70,10 @@ def rpaths(path):
     out = run(OTOOL, "-l", path).splitlines()
     return [out[i + 2].strip().split(" (")[0].split("path ", 1)[1]
             for i, line in enumerate(out) if line.strip() == "cmd LC_RPATH"]
+
+
+def signed(path):
+    return subprocess.run((CODESIGN, "--verify", "--strict", path), capture_output=True).returncode == 0
 
 
 def is_system(dep):
@@ -116,6 +125,20 @@ def soname_seeds(config_h):
     return names
 
 
+def found_by_rpath(dep, requester):
+    """True when an @rpath/ name is a file that one of the binary's own relative run paths leads to
+    (Wine's .so files name each other, such as @rpath/ntdll.so, and rely on @loader_path)."""
+    if not dep.startswith("@rpath/") or not os.path.isfile(requester):
+        return False
+    here = os.path.dirname(os.path.realpath(requester))
+    for r in rpaths(requester):
+        if r.startswith(("@loader_path", "@executable_path")):
+            base = r.replace("@loader_path", here).replace("@executable_path", here)
+            if os.path.exists(os.path.join(base, dep[len("@rpath/"):])):
+                return True
+    return False
+
+
 def rpath_for(binary, libdir):
     rel = os.path.relpath(libdir, os.path.dirname(os.path.realpath(binary)))
     return "@loader_path/" + rel if rel != "." else "@loader_path"
@@ -139,7 +162,7 @@ def main():
     queue = []
 
     def want(dep, requester):
-        if is_system(dep):
+        if is_system(dep) or found_by_rpath(dep, requester):
             return
         src = resolve(dep, requester, args.search)
         if not src:
@@ -190,15 +213,22 @@ def main():
             changes += ["-id", "@rpath/" + os.path.basename(b)]
         wanted = rpath_for(b, libdir)
         have = rpaths(b)
-        for old in have:                                   # nothing absolute may stay
+        for old in dict.fromkeys(have):                    # nothing absolute may stay
             if not old.startswith(("@loader_path", "@executable_path")):
                 changes += ["-delete_rpath", old]
-        if wanted not in have:
+        # A binary that links nothing but system libraries needs no run path: libRuntimeRosettax87 is a
+        # static executable with no room for a new load command.
+        if wanted not in have and any(not is_system(d) for d in dependencies(b)):
             changes += ["-add_rpath", wanted]
         if changes:
-            run(INSTALL_NAME_TOOL, *changes, b)
-            if not args.no_sign:
-                run(CODESIGN, "--force", "--sign", "-", b)
+            try:
+                run(INSTALL_NAME_TOOL, *changes, b)
+            except subprocess.CalledProcessError as e:
+                sys.exit("install_name_tool failed on %s: %s" % (b, e.stderr.strip()))
+        # What the linker or install left unsigned or invalid is signed as well, except
+        # libRuntimeRosettax87, which runtime_loader injects as it is.
+        if not args.no_sign and (changes or (os.path.basename(b) != "libRuntimeRosettax87" and not signed(b))):
+            run(CODESIGN, "--force", "--sign", "-", b)
 
     for dep, requester in missing:
         print("error: %s (needed by %s) not found" % (dep, os.path.relpath(requester, prefix)), file=sys.stderr)
