@@ -34,7 +34,9 @@ D3DMetal is found the same way: when the backend app does not export
 
 ## Pre-releases from CI
 
-Every push to `mnc-11.20` (`RELEASE_BRANCH` in `.github/workflows/build-release.yml`) publishes the
+Not on every push: the bundle CI makes has Wine and its libraries but not rosettax87, DXMT or
+GPTK/D3DMetal, so a release is made by hand until CI can fetch them. Running the workflow by hand on
+`mnc-11.20` (`RELEASE_BRANCH` in `.github/workflows/build-release.yml`) with "publish" ticked publishes the
 build as the pre-release **MacNdCheese Wine 11.20.0**, tag `11.20.0`, with
 `MNC-Wine-11.20.0-osx64.tar.xz` attached. The next build replaces it. To keep one, edit the release on
 GitHub and untick "pre-release": the builds that follow are then published as `11.20.1`, and after that
