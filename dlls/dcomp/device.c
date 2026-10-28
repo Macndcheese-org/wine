@@ -710,7 +710,7 @@ static BOOL gpu_composition_enabled(void)
     static int enabled = -1;
     char buffer[4];
 
-    if (enabled == -1) enabled = GetEnvironmentVariableA("MNC_DCOMP_GPU", buffer, sizeof(buffer)) && buffer[0] == '1';
+    if (enabled == -1) enabled = !GetEnvironmentVariableA("MNC_DCOMP_GPU", buffer, sizeof(buffer)) || buffer[0] != '0';
     return enabled;
 }
 
