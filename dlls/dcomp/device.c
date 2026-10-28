@@ -413,6 +413,7 @@ struct composite_state
     D2D_MATRIX_3X2_F matrix;
     BOOL has_clip;
     RECT clip;
+    HWND *gpu_last;   /* the last child window put in the target window in this pass, the next goes above it */
 };
 
 /* Both matrices use the row vector convention of Direct2D: "a" applies first. */
@@ -688,6 +689,103 @@ static struct composition_visual * shared_visual_target_get_root(HANDLE shared_v
     return visual;
 }
 
+/* A swap chain of DXMT that is created for composition has a window of its own, which DXMT presents to. Instead of
+ * reading the back buffer and blending it into the target window, the window is made a child window of the target
+ * window and put where the visual is, so that the window system shows what DXMT presents. DXMT hands the window
+ * over as private data of the swap chain and moves it when it gets the message, in the thread that owns it. */
+static const GUID mnc_composition_window_guid = {0x6d6e6300, 0x6469, 0x636f, {0x6d, 0x70, 0x77, 0x69, 0x6e, 0x64, 0x6f, 0x77}};
+
+struct mnc_composition_placement
+{
+    HWND parent;
+    HWND insert_after;
+    int x, y, width, height;
+    BOOL visible;
+    BOOL has_clip;
+    RECT clip;
+};
+
+static BOOL gpu_composition_enabled(void)
+{
+    static int enabled = -1;
+    char buffer[4];
+
+    if (enabled == -1) enabled = GetEnvironmentVariableA("MNC_DCOMP_GPU", buffer, sizeof(buffer)) && buffer[0] == '1';
+    return enabled;
+}
+
+static void post_placement(HWND window, const struct mnc_composition_placement *placement)
+{
+    static UINT message;
+    struct mnc_composition_placement *copy;
+
+    if (!message) message = RegisterWindowMessageA("MNC_DXMT_COMPOSITION_PLACE");
+    if (!(copy = malloc(sizeof(*copy)))) return;
+    *copy = *placement;
+    if (!PostMessageW(window, message, 0, (LPARAM)copy)) free(copy);
+}
+
+static BOOL place_swapchain_window(const struct composition_target *target, struct composition_visual *visual,
+        IDXGISwapChain1 *swapchain, const DXGI_SWAP_CHAIN_DESC *desc, const struct composite_state *state)
+{
+    struct mnc_composition_placement placement = {0};
+    UINT size = sizeof(HWND);
+    HWND window = NULL;
+    RECT rect, clip;
+
+    if (!gpu_composition_enabled()) return FALSE;
+    if (FAILED(IDXGISwapChain1_GetPrivateData(swapchain, &mnc_composition_window_guid, &size, &window)) || !window)
+        return FALSE;
+
+    /* only a translation is a child window; the other transforms are blended by the compositor */
+    if (state->matrix._11 != 1.0f || state->matrix._22 != 1.0f || state->matrix._12 != 0.0f || state->matrix._21 != 0.0f)
+    {
+        if (visual->gpu_window)
+        {
+            placement.visible = FALSE;
+            post_placement(window, &placement);
+            visual->gpu_window = NULL;
+        }
+        return FALSE;
+    }
+
+    rect.left = floorf(state->matrix._31 + 0.5f);
+    rect.top = floorf(state->matrix._32 + 0.5f);
+    rect.right = rect.left + desc->BufferDesc.Width;
+    rect.bottom = rect.top + desc->BufferDesc.Height;
+    if (state->has_clip)
+    {
+        IntersectRect(&clip, &rect, &state->clip);
+        OffsetRect(&clip, -rect.left, -rect.top);
+    }
+    else SetRectEmpty(&clip);
+
+    placement.parent = target->hwnd;
+    placement.insert_after = *state->gpu_last ? *state->gpu_last : HWND_TOP;
+    placement.x = rect.left;
+    placement.y = rect.top;
+    placement.width = rect.right - rect.left;
+    placement.height = rect.bottom - rect.top;
+    placement.visible = TRUE;
+    placement.has_clip = state->has_clip;
+    placement.clip = clip;
+
+    if (visual->gpu_window != window || visual->gpu_parent != target->hwnd || visual->gpu_after != placement.insert_after ||
+        !EqualRect(&visual->gpu_rect, &rect) || visual->gpu_has_clip != state->has_clip ||
+        (state->has_clip && !EqualRect(&visual->gpu_clip, &clip)))
+    {
+        post_placement(window, &placement);
+        visual->gpu_window = window;
+        visual->gpu_parent = target->hwnd;
+        visual->gpu_after = placement.insert_after;
+        visual->gpu_rect = rect;
+        visual->gpu_has_clip = state->has_clip;
+        visual->gpu_clip = clip;
+    }
+    *state->gpu_last = window;
+    return TRUE;
+}
+
 static HRESULT do_composite(const struct composition_target *target, struct composition_visual *visual,
         const struct composite_state *parent_state)
 {
@@ -703,6 +801,7 @@ static HRESULT do_composite(const struct composition_target *target, struct comp
     composite_state.matrix = matrix_multiply(&local, &parent_state->matrix);
     composite_state.has_clip = parent_state->has_clip;
     composite_state.clip = parent_state->clip;
+    composite_state.gpu_last = parent_state->gpu_last;
     if (visual->has_clip)
     {
         RECT clip = matrix_transform_rect(&composite_state.matrix, visual->clip.left, visual->clip.top,
@@ -743,6 +842,12 @@ static HRESULT do_composite(const struct composition_target *target, struct comp
                 ERR("Failed to get the swapchain description, hr %#lx.\n", hr);
                 IDXGISwapChain1_Release(swapchain);
                 return hr;
+            }
+
+            if (place_swapchain_window(target, visual, swapchain, &swapchain_desc, &composite_state))
+            {
+                IDXGISwapChain1_Release(swapchain);
+                goto children;
             }
 
             /* The front buffer is the last back buffer because the composition swapchain must
@@ -793,6 +898,7 @@ static HRESULT do_composite(const struct composition_target *target, struct comp
         IDXGISurface_Release(dxgi_surface);
     }
 
+children:
     LIST_FOR_EACH_ENTRY(child_visual, &visual->child_visuals, struct composition_visual, entry)
     {
         do_composite(target, child_visual, &composite_state);
@@ -809,6 +915,7 @@ static DWORD WINAPI composite_thread_proc(void *iface)
     struct composition_target *target;
     struct composition_visual *visual;
     struct composite_state root_state = {{{{1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f}}}};
+    HWND gpu_last;
     HDC hdc;
 
     /* TODO: Implement and use D3DKMTWaitForVerticalBlankEvent() */
@@ -836,6 +943,8 @@ static DWORD WINAPI composite_thread_proc(void *iface)
                 continue;
 
             visual = impl_from_IDCompositionVisual(target->root);
+            gpu_last = NULL;
+            root_state.gpu_last = &gpu_last;
             if (SUCCEEDED(do_composite(target, visual, &root_state)))
                 count++;
         }

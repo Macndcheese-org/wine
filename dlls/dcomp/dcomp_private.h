@@ -96,6 +96,13 @@ struct composition_visual
     HANDLE shared_visual_handle;
     int version;
     LONG ref;
+    /* The window of the swap chain that is the content, when it is shown in the target window as a child window */
+    HWND gpu_window;
+    HWND gpu_parent;
+    HWND gpu_after;
+    RECT gpu_rect;
+    BOOL gpu_has_clip;
+    RECT gpu_clip;
 };
 
 static inline struct composition_device *impl_from_IDCompositionDevice(IDCompositionDevice *iface)
