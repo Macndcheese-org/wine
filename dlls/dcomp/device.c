@@ -770,7 +770,9 @@ static BOOL place_swapchain_window(const struct composition_target *target, stru
     placement.has_clip = state->has_clip;
     placement.clip = clip;
 
-    if (visual->gpu_window != window || visual->gpu_parent != target->hwnd || visual->gpu_after != placement.insert_after ||
+    if (target->gpu_now_count < ARRAY_SIZE(target->gpu_now))
+        ((struct composition_target *)target)->gpu_now[((struct composition_target *)target)->gpu_now_count++] = window;
+    if (visual->gpu_epoch != target->gpu_epoch || visual->gpu_window != window || visual->gpu_parent != target->hwnd || visual->gpu_after != placement.insert_after ||
         !EqualRect(&visual->gpu_rect, &rect) || visual->gpu_has_clip != state->has_clip ||
         (state->has_clip && !EqualRect(&visual->gpu_clip, &clip)))
     {
@@ -781,9 +783,27 @@ static BOOL place_swapchain_window(const struct composition_target *target, stru
         visual->gpu_rect = rect;
         visual->gpu_has_clip = state->has_clip;
         visual->gpu_clip = clip;
+        visual->gpu_epoch = target->gpu_epoch;
     }
     *state->gpu_last = window;
     return TRUE;
+}
+
+/* Hides the windows that were shown in the target window in the last pass and are not any more. */
+static void end_gpu_pass(struct composition_target *target)
+{
+    struct mnc_composition_placement hide = {0};
+    UINT i, j;
+
+    for (i = 0; i < target->gpu_placed_count; i++)
+    {
+        for (j = 0; j < target->gpu_now_count; j++) if (target->gpu_now[j] == target->gpu_placed[i]) break;
+        if (j < target->gpu_now_count) continue;
+        post_placement(target->gpu_placed[i], &hide);
+        target->gpu_epoch++; /* a visual that is back is placed again */
+    }
+    memcpy(target->gpu_placed, target->gpu_now, target->gpu_now_count * sizeof(*target->gpu_now));
+    target->gpu_placed_count = target->gpu_now_count;
 }
 
 static HRESULT do_composite(const struct composition_target *target, struct composition_visual *visual,
@@ -945,8 +965,10 @@ static DWORD WINAPI composite_thread_proc(void *iface)
             visual = impl_from_IDCompositionVisual(target->root);
             gpu_last = NULL;
             root_state.gpu_last = &gpu_last;
+            target->gpu_now_count = 0;
             if (SUCCEEDED(do_composite(target, visual, &root_state)))
                 count++;
+            end_gpu_pass(target);
         }
 
         if (!count)

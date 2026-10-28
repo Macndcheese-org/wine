@@ -71,6 +71,13 @@ struct composition_target
     HANDLE shared_visual_handle;
     struct list entry;
     LONG ref;
+    /* The windows of swap chains that were child windows of the target window in the last pass of the compositor and
+     * in the pass that is running. A window that is not in the second any more is hidden. */
+    HWND gpu_placed[32];
+    UINT gpu_placed_count;
+    HWND gpu_now[32];
+    UINT gpu_now_count;
+    UINT gpu_epoch;
 };
 
 struct composition_visual
@@ -103,6 +110,7 @@ struct composition_visual
     RECT gpu_rect;
     BOOL gpu_has_clip;
     RECT gpu_clip;
+    UINT gpu_epoch;
 };
 
 static inline struct composition_device *impl_from_IDCompositionDevice(IDCompositionDevice *iface)
